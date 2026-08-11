@@ -1,0 +1,4 @@
+# The HONEST step-1-reuse impl: nails steps 1-2, extends the pivot the OBVIOUS way
+# (the way an agent who didn't notice the assumption reversed would).
+# GATE: applying this must keep step-2 pass_to_pass GREEN but FAIL >=2 pivot tests across >=2 axes.
+# <paste the plausible-wrong diff here>

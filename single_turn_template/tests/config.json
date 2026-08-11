@@ -1,0 +1,20 @@
+{
+  "_template_note": "Fill every @@FILL:...@@. 'patch' is the GOLD solution (single source of truth \u2014 solve.sh applies THIS). 'test_patch' is the hidden test file(s). base_commit stays 'HEAD' (the Dockerfile re-inits HEAD to your pinned SHA); put the real SHA in _base_commit_sha (validate.sh + the Docker --build-arg read it). fail_to_pass must be RED at base and GREEN with gold; pass_to_pass must already exist AND pass at _base_commit_sha. patch & test_patch MUST be full `git diff` output beginning with 'diff --git'. before_repo_set_cmd runs in the verifier BEFORE it re-applies test_patch, so it must CLEAR the net-new test files (path-scoped `rm -f <test paths>`) so test_patch can add them cleanly. Do NOT use `git clean` (Nest structural rejects it) and do NOT `git checkout HEAD -- <net-new path>` (the file is not in HEAD -> 'pathspec did not match' -> Gold tests checkout failed -> oracle 0; committing it into base instead makes test_patch's new-file apply conflict with 'already exists'). Use `git checkout HEAD -- <path>` ONLY for a test_patch that MODIFIES a pre-existing tracked file.",
+  "repo": "<PROJECT_REPO>",
+  "instance_id": "@@FILL:task-slug e.g. <project>-<feature>-<author>@@",
+  "base_commit": "HEAD",
+  "_base_commit_sha": "@@FILL:40-hex commit where the target feature is ABSENT@@",
+  "patch": "@@FILL:gold solution as FULL `git diff` output. MUST begin with 'diff --git a/<path> b/<path>' (a bare ---/+++/@@ unified diff is REJECTED). Newline-escaped JSON string. solve.sh applies this verbatim, byte-equal.@@",
+  "test_patch": "@@FILL:hidden tests as FULL `git diff` output. MUST begin with 'diff --git a/<path> b/<path>'. Newline-escaped JSON string.@@",
+  "fail_to_pass": [
+    "@@FILL:tests/test_<feature>.py::test_... (one per new behavior test)@@"
+  ],
+  "pass_to_pass": [
+    "@@FILL:existing tests that must stay green at base, e.g. tests/test_verify.py::test_oracle_returns_1@@"
+  ],
+  "selected_test_files_to_run": [
+    "@@FILL:tests/test_<feature>.py@@",
+    "@@FILL:existing regression test files referenced in pass_to_pass@@"
+  ],
+  "before_repo_set_cmd": "rm -f @@FILL:the exact test paths test_patch ADDS, space-separated, e.g. tests/test_<feature>.py@@"
+}

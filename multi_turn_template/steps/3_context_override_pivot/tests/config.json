@@ -1,0 +1,18 @@
+{
+  "repo": "<owner>/<repo>",
+  "instance_id": "<name>-<step>",
+  "base_commit": "<base_commit_sha>",
+  "patch": "<CUMULATIVE gold from base (steps 1..N) \u2014 standalone, passes this step's tests>",
+  "test_patch": "<THIS step's tests only>",
+  "fail_to_pass": [
+    "tests/test_pkg.py::<this step's new tests>"
+  ],
+  "pass_to_pass": [
+    "tests/test_pkg.py::<prior-step regression + import/surface>"
+  ],
+  "selected_test_files_to_run": [
+    "tests/test_pkg.py"
+  ],
+  "before_repo_set_cmd": "rm -f <this step's net-new test file(s) that test_patch adds, e.g. tests/test_pkg.py>",
+  "_before_repo_set_cmd_note": "Path-scoped rm of ONLY the net-new test files test_patch adds (source paths are disjoint, so agent source survives). Single line. Do NOT use git clean (Nest rejects) or git checkout of a net-new path (pathspec fail -> oracle 0). See pipeline/check_before_repo_set_cmd.py."
+}

@@ -1,0 +1,40 @@
+schema_version = "1.1"
+
+[task]
+name = "codimango/@@FILL:task-slug@@"
+format = "swe_bench_single_turn"
+workstream = "swe_public_repo"
+description = "@@FILL:one-line task description@@"
+keywords = ["@@FILL@@", "python"]
+
+[[task.authors]]
+name = "@@FILL:Your Name@@"
+email = "@@FILL:you@meta.com@@"
+
+[metadata]
+tags = ["synthetic", "aai-labs-harvester", "meta/avocado-5.14-code", "human-reviewed", "swe-bench-pro", "aai-labs", "aai-labs-<PROJECT>"]
+category_subdomain = "machine_learning"
+category_usecase = "extend_behavior"
+
+[verifier]
+timeout_sec = 600.0
+
+[agent]
+timeout_sec = 1800.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240
+gpus = 0
+# Grading is credless + mocked, so no network is needed at grade time. Keep false
+# for hermeticity unless the agent genuinely needs the network at runtime.
+allow_internet = false
+mcp_servers = []
+
+[verifier.env]
+
+[environment.env]
+
+[solution.env]

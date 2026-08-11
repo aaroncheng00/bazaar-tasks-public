@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+*.token
+gh_token.txt
+github_token.txt

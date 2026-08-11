@@ -1,0 +1,8 @@
+# NEVER commit credentials — token is passed to Docker via --secret at build time.
+gh_token.txt
+github_token.txt
+*.token
+# Local proof artifacts
+/logs/
+tests/naive.patch
+__pycache__/

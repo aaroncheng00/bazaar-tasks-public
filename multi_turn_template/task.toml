@@ -1,0 +1,68 @@
+schema_version = "1.1"
+
+[task]
+format = "swe_bench_multi_turn"
+workstream = "swe_public_repo"
+name = "codimango/<project>-<NAME>-<author>"
+description = "<ONE-LINE: base mechanism → coupled extension → context-override pivot>"
+keywords = ["<domain>", "<mechanism>", "multi-turn"]
+
+[[task.authors]]
+name = "<YOUR NAME>"
+email = "<your-unixname>@meta.com"
+
+[metadata]
+difficulty = "hard"
+category = "iterate_on_feature"
+tags = ["synthetic", "aai-labs-harvester", "meta/avocado-5.14-code", "human-reviewed", "swe-bench-pro", "aai-labs", "aai-labs-<PROJECT>", "multi-turn", "context-overriding"]
+category_subdomain = "systems_and_infra"        # REQUIRED valid enum: algorithms_and_data_structures, systems_and_infra, data_infra, devops_and_tooling, backend_services, machine_learning, ...
+category_usecase = "extend_behavior"
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240
+gpus = 0
+allow_internet = false                          # keep false (determinism / anti-cheat)
+mcp_servers = []
+
+[environment.env]
+
+# --- Step 1: base mechanism (moderate) ---
+[[steps]]
+name = "1_base_mechanism"
+dependencies = []
+min_reward = 1.0
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[steps.agent]
+timeout_sec = 600.0
+
+# --- Step 2: coupled extension that reuses step-1 state (MUST have teeth) ---
+[[steps]]
+name = "2_coupled_extension"
+dependencies = ["1_base_mechanism"]
+min_reward = 1.0
+inherit_prior_session = true
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[steps.agent]
+timeout_sec = 600.0
+
+# --- Step 3: context-override PIVOT (the discriminator) ---
+[[steps]]
+name = "3_context_override_pivot"
+dependencies = ["2_coupled_extension"]
+min_reward = 1.0
+inherit_prior_session = true
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[steps.agent]
+timeout_sec = 600.0
