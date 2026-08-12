@@ -1,0 +1,13 @@
+# codimango bench run artifacts — trial logs, per-run configs, results.
+# Local proof evidence; cite run ids in cards, do not commit the trees.
+jobs/
+
+# Local scratch
+*.log
+.DS_Store
+
+# Credentials — tokens for credless Docker builds live outside the repo
+# (see <GH_TOKEN_FILE> in PROJECT.md), but belt and braces:
+*_gh_token
+*.pat
+.env
