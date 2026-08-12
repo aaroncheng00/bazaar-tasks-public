@@ -1,8 +1,8 @@
 diff --git a/apps/api/src/bazaar_api/modules/listings/images.py b/apps/api/src/bazaar_api/modules/listings/images.py
-index fc5ec16..9f1ff7d 100644
+index fc5ec16..ed01cdc 100644
 --- a/apps/api/src/bazaar_api/modules/listings/images.py
 +++ b/apps/api/src/bazaar_api/modules/listings/images.py
-@@ -2,15 +2,187 @@
+@@ -2,15 +2,188 @@
  
  from __future__ import annotations
  
@@ -113,10 +113,11 @@ index fc5ec16..9f1ff7d 100644
 +    try:
 +        app_id = _uuid.UUID(row.app_id)
 +    except ValueError:
-+        try:
-+            app_id = _uuid.uuid5(_uuid.NAMESPACE_DNS, row.app_id)
-+        except Exception:
-+            app_id = _uuid.UUID(int=0)
++        raise ApiError(
++            status.HTTP_500_INTERNAL_SERVER_ERROR,
++            "internal_error",
++            "stored app_id is not a uuid — tenant provisioning/config bug",
++        ) from None
 +
 +    from bazaar_api.generated.models import Category, Condition, Currency
 +
@@ -192,7 +193,7 @@ index fc5ec16..9f1ff7d 100644
  
  @router.post(
      "/{listing_id}/images",
-@@ -18,15 +190,66 @@ router = APIRouter(prefix="/listings", tags=["listings"], route_class=Idempotent
+@@ -18,15 +191,66 @@ router = APIRouter(prefix="/listings", tags=["listings"], route_class=Idempotent
      operation_id="createImageUpload",
      summary="Step 1 of upload — request a presigned URL",
      tags=["listings"],
@@ -262,7 +263,7 @@ index fc5ec16..9f1ff7d 100644
      )
  
  
-@@ -36,13 +259,178 @@ async def create_image_upload(
+@@ -36,13 +260,176 @@ async def create_image_upload(
      operation_id="attachImage",
      summary="Step 2 of upload — verify and link the object",
      tags=["listings"],
@@ -361,7 +362,6 @@ index fc5ec16..9f1ff7d 100644
 +            "actual content_length exceeds 10MiB",
 +        )
 +
-+    # Use RETURNING to get fresh image_keys and avoid ORM identity-map caching
 +    result = await session.execute(
 +        text(
 +            "UPDATE listings SET image_keys = image_keys || jsonb_build_array(cast(:key as text)), updated_at = now() WHERE id = :id RETURNING image_keys"
@@ -376,7 +376,6 @@ index fc5ec16..9f1ff7d 100644
 +            f"No listing {_sanitize_ref(listing_id)} for this app.",
 +        )
 +    await session.flush()
-+    # Refresh the row from DB to populate all fields, but override image_keys with RETURNING value
 +    await session.refresh(row)
 +    row.image_keys = updated_keys
 +
