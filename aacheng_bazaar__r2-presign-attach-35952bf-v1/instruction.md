@@ -26,13 +26,13 @@ Implement the two handlers replacing the 501 stubs, plus `reap_orphans()` helper
 
 4. **Key namespace:** Generated `image_key` must be namespaced by tenant to prevent guessing — include `app_id` and `listing_id` plus a random component and proper file extension.
 
-5. **Presigned URL:** Return `method=PUT`, `expires_in=900`, and a presigned PUT URL for the generated key (boto3 if R2 config present, otherwise a deterministic fallback). Persist enough pending metadata for attach verification and the reaper to work (TTL a couple days).
+5. **Presigned URL:** Return `method=PUT`, `expires_in=900`, and a presigned PUT URL for the generated key (boto3 if R2 config present, otherwise a deterministic fallback). Persist pending metadata in Redis for attach verification and reaper: use key `pending_image:{app_id}:{image_key}` with at least `content_type`, `content_length`, `created_at` ISO (TTL a couple days). Tests may inject `actual_content_type`/`actual_content_length` into that JSON to simulate a HEAD mismatch.
 
-6. **Attach-verify:** `image_key` must be namespaced to the requesting app/listing, else 404. Verify listing exists and seller check as above. Determine actual content-type/size of the uploaded object — try R2 `head_object` if client available, otherwise fall back to pending metadata. If no object found → 404. If actual type not allowed or size >10MiB → 400. On success, append (not overwrite) the key to `listings.image_keys` (JSONB) and return the updated `Listing` with `image_urls` derived from keys.
+6. **Attach-verify:** `image_key` must be namespaced to the requesting app/listing, else 404. Verify listing exists and seller check as above. Determine actual content-type/size — try R2 `head_object` if client available, otherwise fall back to the pending Redis entry (use `actual_*` fields if present, else `content_*`). If no object found → 404. If actual type not allowed or size >10MiB → 400 `validation_failed`. On success, append (not overwrite) the key to `listings.image_keys` (JSONB column) and return the updated `Listing` with `image_urls` derived from keys.
 
-7. **Idempotency:** Router already uses `IdempotentRoute`. Same `Idempotency-Key` + same body must replay original response, not allocate a new key.
+7. **Idempotency:** Router already uses `IdempotentRoute`. Same `Idempotency-Key` + same body must replay original response, not allocate a new key. Note: HMAC signatures are single-use nonces — a retry with same timestamp reuses the signature and is rejected as replay before it reaches idempotency. A correct client re-signs with a fresh timestamp while keeping the Idempotency-Key stable.
 
-8. **Orphan reaper:** `async def reap_orphans() -> int` scans pending uploads, collects referenced keys from `SELECT image_keys FROM listings`, deletes pending older than 24h that are not referenced and deletes the R2 object if possible. Return count.
+8. **Orphan reaper:** `async def reap_orphans() -> int` scans Redis keys `pending_image:*`, collects referenced keys from `SELECT image_keys FROM listings`, deletes pending older than 24h that are not referenced and deletes the R2 object via `delete_object` if client exists. Return count.
 
 ## Constraints
 
