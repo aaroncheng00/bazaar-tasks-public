@@ -9,7 +9,7 @@ run_all_tests() {
   cd /app/apps/api
   export PYTHONPATH=/app/apps/api/src:$PYTHONPATH
   uv run alembic upgrade head 2>&1 | tail -n 20
-  python -m pytest tests/ -v --tb=short || true
+  uv run python -m pytest tests/ -v --tb=short || true
 }
 
 run_selected_tests() {
@@ -23,7 +23,7 @@ run_selected_tests() {
     # test_file from config is like apps/api/tests/... - convert to relative from apps/api
     # If it starts with apps/api/, strip that prefix
     test_path=$(echo "$test_file" | sed 's|^apps/api/||' | sed 's/::.*//')
-    python -m pytest "$test_path" -v --tb=short || true
+    uv run python -m pytest "$test_path" -v --tb=short || true
   done
 }
 
