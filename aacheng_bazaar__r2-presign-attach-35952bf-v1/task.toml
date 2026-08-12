@@ -1,0 +1,41 @@
+schema_version = "1.1"
+
+[task]
+name = "codimango/aacheng_bazaar__r2-presign-attach-35952bf-v1"
+format = "swe_bench_single_turn"
+workstream = "swe_public_repo"
+description = "Implement R2 presigned upload + attach-verify + orphan reaper replacing 501 stubs"
+keywords = ["python", "fastapi", "s3", "r2", "presigned-url", "tenant-isolation"]
+
+[[task.authors]]
+name = "Aaron Cheng"
+email = "aacheng@meta.com"
+
+[metadata]
+tags = ["synthetic", "aai-labs-harvester", "meta/avocado-5.14-code", "human-reviewed", "swe-bench-pro", "aai-labs", "bazaar-s1"]
+category_subdomain = "build_and_ci"
+category_usecase = "provision_infrastructure"
+difficulty = "hard"
+reward_type = "binary"
+multi_container = true
+
+[verifier]
+timeout_sec = 600.0
+
+[agent]
+timeout_sec = 1800.0
+
+[environment]
+build_timeout_sec = 900.0
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240
+gpus = 0
+allow_internet = true
+mcp_servers = []
+
+[verifier.env]
+
+[environment.env]
+
+[solution.env]

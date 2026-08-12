@@ -1,0 +1,1224 @@
+openapi: 3.1.0
+info:
+  title: Bazaar API
+  version: 0.3.0
+  description: |
+    Bazaar — the embeddable P2P marketplace primitive. Headless, multi-tenant
+    commerce API: Listings and Reviews. Integrators own identity and UX;
+    Bazaar owns inventory, reputation, and media.
+
+    The Contact module is descoped from the MVP. Buyer→seller contact is
+    expressed through the `actions` enum on listings (`contact`); the host
+    app owns the actual contact handoff via its own native channel. Bazaar
+    stores no contact handles, threads, or offers.
+
+    # Conventions
+    - **Auth**: every `/v1` request carries `X-Bazaar-Key` (key_id),
+      `X-Bazaar-Timestamp` (unix seconds), and `X-Bazaar-Signature`
+      (HMAC-SHA256 over method + path + raw query + sha256(body) + timestamp,
+      300s window, single-use nonce). Auth resolves the key to exactly one
+      `app_id`; all data is tenant-isolated by `app_id` (RLS backstop).
+      Exempt: `/healthz`, tenant signup (`POST /v1/apps`), and the first key
+      issuance (which uses a one-time `provisioning_token` instead).
+    - **Who is acting**: auth proves which *app* is calling, not which user.
+      Seller-gated writes therefore carry `acting_user_id` in the body —
+      never a header, so it stays inside the HMAC-signed body hash — checked
+      against the listing's `seller_user_id` (403 `seller_only` on mismatch).
+      The `actions` list is a rendering hint; this check is the real
+      enforcement — a viewer/actor mismatch returns 403 `seller_only` even when
+      a prior read showed `edit` in `actions`.
+    - **IDs**: public ids are prefixed strings (`lst_…`, `rev_…`, `bzk_…`);
+      the DB stores plain uuids and the API boundary adds/strips the prefix.
+      `app_id` stays a plain uuid.
+    - **Idempotency**: every POST accepts `Idempotency-Key` (uuid); it is
+      REQUIRED on `POST /v1/listings`. Retries with the same key return the
+      original response, never double-create.
+    - **Pagination**: `?offset=&limit=` returns `data` plus
+      `pagination: { total, limit, offset, has_more }`. An invalid offset
+      returns 400, not 500. Cursor pagination is the additive v1 upgrade
+      (`next_cursor` alongside offset).
+    - **Errors**: `{ "error": { "code", "message", "request_id" } }`.
+    - **Money**: integer cents only; currency is USD-only in the MVP.
+    - **Forward compatibility**: clients MUST ignore unrecognized values in
+      `actions` and `status`; new enum values arrive in v1 without a version
+      bump.
+    - **Media**: listings return public `image_urls` (CDN-served from R2, zero
+      egress), index-aligned with the internal `image_keys`. Public-read is
+      the MVP default; signed reads are the v1 path.
+    - **PII**: user ids are opaque integrator-supplied strings. Bazaar stores
+      no contact handles — buyer→seller contact is the host app's native
+      channel, surfaced via the listing `actions` enum.
+tags:
+  - name: apps
+    description: Tenant provisioning (S1)
+  - name: listings
+    description: Listing CRUD, images, lifecycle, browse/search (P2, P3, S1, S2)
+  - name: reviews
+    description: Review write (S2) and read/aggregate (P1)
+paths:
+  /healthz:
+    get:
+      summary: Liveness/readiness probe
+      description: |
+        Outside `/v1` and HMAC-exempt by design — neither Docker HEALTHCHECK
+        nor a Render probe signs requests. Checks DB and Redis (auth's nonce
+        store; if Redis is down, no authenticated request can succeed).
+      operationId: healthz
+      tags: [apps]
+      security: []
+      responses:
+        "200":
+          description: All dependencies healthy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Healthz" }
+        "503":
+          description: A hard dependency is down — returns failing component states, not ErrorEnvelope, so a probe-debugger can see which dep failed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Healthz" }
+
+  /v1/apps:
+    post:
+      summary: Provision a tenant (app)
+      description: |
+        Self-serve tenant signup (unauthenticated but rate-limited). Returns
+        the new `app_id` plus a one-time `provisioning_token` (15-minute TTL)
+        used to issue the first API key. MVP local dev instead seeds a dev
+        tenant via `docker compose` (KEYS env). Owner: S1.
+      operationId: createApp
+      tags: [apps]
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppCreateRequest" }
+      responses:
+        "201":
+          description: Tenant created; provisioning_token shown once
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/App" }
+        "409": { $ref: "#/components/responses/IdempotencyConflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/apps/{app_id}/keys:
+    post:
+      summary: Issue an API key for a tenant
+      description: |
+        Creates a `key_id` + `secret`. **The secret is returned exactly once;
+        the server stores only a hash.** Multiple active keys per app allow
+        rotation without downtime. `X-Bazaar-Key` carries `key_id`; the HMAC
+        is computed with the secret.
+
+        Bootstrap: the FIRST key for an app authenticates with
+        `Authorization: Bearer <provisioning_token>` (the single-use token
+        returned by `POST /v1/apps`); subsequent keys (rotation) sign normally
+        with an existing active key. Owner: S1.
+      operationId: createAppKey
+      tags: [apps]
+      security:
+        - BazaarHMAC: []
+        - ProvisioningBearer: []
+      parameters:
+        - $ref: "#/components/parameters/AppId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "201":
+          description: Key created; secret shown once
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppKeyCreated" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/IdempotencyConflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        default: { $ref: "#/components/responses/Error" }
+    get:
+      summary: List API keys (metadata only)
+      description: |
+        Newest first. Metadata only — `key_id`, `created_at`, `revoked_at`;
+        the secret is shown once at creation and is never listable. Scoped to
+        the authenticated tenant: path `app_id` must match it. Owner: S1.
+      operationId: listAppKeys
+      tags: [apps]
+      security:
+        - BazaarHMAC: []
+      parameters:
+        - $ref: "#/components/parameters/AppId"
+      responses:
+        "200":
+          description: The tenant's keys, newest first
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiKeyList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Path app_id is not the authenticated tenant
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+              example:
+                error:
+                  code: forbidden
+                  message: cannot manage keys for another app
+                  request_id: req_5e2c9a
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/apps/{app_id}/keys/{key_id}/revoke:
+    post:
+      summary: Revoke an API key (rotation)
+      description: |
+        Soft-revoke: the row stays for audit. Create + revoke are separate
+        primitives so rotation is mint #2 → deploy → revoke #1, with no
+        window where no valid key exists. The presenting key cannot revoke
+        itself (forces mint-first hygiene; the only-key-leaked recovery path
+        is the ops CLI). Owner: S1.
+      operationId: revokeAppKey
+      tags: [apps]
+      security:
+        - BazaarHMAC: []
+      parameters:
+        - $ref: "#/components/parameters/AppId"
+        - $ref: "#/components/parameters/KeyId"
+      responses:
+        "200":
+          description: Key revoked
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiKeyRevoked" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Path app_id is not the authenticated tenant
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "404":
+          description: No active key with this key_id for this tenant
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "409":
+          description: The presenting key cannot revoke itself
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/listings:
+    post:
+      summary: Create a listing
+      description: |
+        Idempotent via `Idempotency-Key` (REQUIRED here). Derives geohash
+        server-side. Seller is the opaque integrator `seller_user_id`.
+        Owner: P2.
+      operationId: createListing
+      tags: [listings]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ListingCreateRequest" }
+      responses:
+        "201":
+          description: Listing created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Listing" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/IdempotencyConflict" }
+        default: { $ref: "#/components/responses/Error" }
+    get:
+      summary: Browse / search listings
+      description: |
+        Browse/search with full-text (`q`), geo, category/condition/price
+        filters, and offset pagination. `radius_unit` lets US integrators send
+        miles; it is converted to km server-side.
+
+        `lat`+`lng` are OPTIONAL but pairwise: both → geo-filtered feed with
+        `distance_km` per item; neither → tenant-wide feed (host apps without
+        location permission still get a browse surface); exactly one → 400
+        `validation_failed`.
+
+        `sort` is optional: `newest` (default), `price_asc`, `price_desc`;
+        `relevance` (ts_rank) is the default when `q` is present.
+
+        `seller_user_id` + `status` filters (single-value each; the Manage
+        view makes two calls for active + sold) power the seller's Manage view;
+        the default is active-only, so sold/removed items appear only when
+        asked for.
+
+        When `viewer_user_id` is present, each item carries `actions[]`
+        resolved per viewer via `resolve_actions()`. Owner: P3.
+      operationId: browseListings
+      tags: [listings]
+      parameters:
+        - $ref: "#/components/parameters/Lat"
+        - $ref: "#/components/parameters/Lng"
+        - $ref: "#/components/parameters/RadiusKm"
+        - $ref: "#/components/parameters/RadiusUnit"
+        - $ref: "#/components/parameters/Q"
+        - $ref: "#/components/parameters/Category"
+        - $ref: "#/components/parameters/Condition"
+        - $ref: "#/components/parameters/PriceMinCents"
+        - $ref: "#/components/parameters/PriceMaxCents"
+        - $ref: "#/components/parameters/Sort"
+        - $ref: "#/components/parameters/SellerUserId"
+        - $ref: "#/components/parameters/ListingStatusFilter"
+        - $ref: "#/components/parameters/ViewerUserId"
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Page of listings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ListingPage" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503":
+          description: |
+            Database timeout — search temporarily unavailable. Owner: P3.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+              example:
+                error:
+                  code: search_unavailable
+                  message: search temporarily unavailable
+                  request_id: req_01J8ZK3M0Q
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/listings/{listing_id}:
+    get:
+      summary: Get listing detail
+      description: |
+        When `viewer_user_id` is present, the response carries `actions[]`
+        resolved per viewer via the shared `resolve_actions()` helper:
+        non-seller on active → `["contact"]`; seller on own active →
+        `["edit", "mark_sold", "remove"]`; recorded buyer on sold with no
+        review yet → `["leave_review"]`; everyone else on sold/removed →
+        `[]`. `viewer_user_id` is supplied by the host app by design — HMAC
+        auth identifies the calling app, not the end user. Owner: P2.
+      operationId: getListing
+      tags: [listings]
+      parameters:
+        - $ref: "#/components/parameters/ListingId"
+        - $ref: "#/components/parameters/ViewerUserId"
+      responses:
+        "200":
+          description: Listing detail
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Listing" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/Error" }
+    patch:
+      summary: Update a listing (seller only)
+      description: |
+        Seller-only: the body's `acting_user_id` is checked against the
+        listing's `seller_user_id` (403 `seller_only` on mismatch). The
+        `actions` list is a UI hint; this check is the enforcement point.
+        RLS is the tenant backstop. The patchable field set is enumerated as
+        the typed PATCH body in this YAML (`image_keys` is never
+        client-writable, per gap #2). Lifecycle: PATCH on sold/removed →
+        409 `listing_already_sold`. Owner: P2.
+      operationId: updateListing
+      tags: [listings]
+      parameters:
+        - $ref: "#/components/parameters/ListingId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ListingPatchRequest" }
+      responses:
+        "200":
+          description: Updated listing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Listing" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerOnly" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/ListingAlreadySold" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/listings/{listing_id}/images:
+    post:
+      summary: Step 1 of upload — request a presigned URL
+      description: |
+        Returns a presigned R2 PUT URL; the client uploads bytes directly —
+        they never transit the API. Keys are namespaced
+        `{app_id}/listings/{listing_id}/{uuid}.jpg`. A presigned PUT cannot
+        enforce the declared content-type/size, so step 2
+        (`…/images/attach`) verifies the actual object before linking.
+        Seller-only via `acting_user_id`. Owner: S1.
+      operationId: createImageUpload
+      tags: [listings]
+      parameters:
+        - $ref: "#/components/parameters/ListingId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ImageUploadRequest" }
+      responses:
+        "200":
+          description: Presigned upload target
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ImageUpload" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerOnly" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/IdempotencyConflict" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/listings/{listing_id}/images/attach:
+    post:
+      summary: Step 2 of upload — verify and link the object
+      description: |
+        The server HEADs the R2 object, validates actual content-type and
+        size against declared limits, appends the key to `image_keys`, and
+        returns the updated Listing. This is the verify hook a presigned PUT
+        cannot provide. Unattached uploads are reaped after 24h. Seller-only
+        via `acting_user_id`. Owner: S1.
+      operationId: attachImage
+      tags: [listings]
+      parameters:
+        - $ref: "#/components/parameters/ListingId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ImageAttachRequest" }
+      responses:
+        "200":
+          description: Image verified and linked; updated listing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Listing" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerOnly" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/IdempotencyConflict" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/listings/{listing_id}/mark_sold:
+    post:
+      summary: Mark a listing sold and record the buyer
+      description: |
+        Sets `status: sold` and records `buyer_user_id` — the verified
+        interaction record that gates review eligibility. Seller-only via
+        `acting_user_id`.
+
+        Naturally idempotent: the same `buyer_user_id` returns 200 with the
+        same listing; a conflicting state (already sold to a different buyer,
+        or removed) returns 409 `listing_already_sold`. Owner: S2.
+      operationId: markListingSold
+      tags: [listings]
+      parameters:
+        - $ref: "#/components/parameters/ListingId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MarkSoldRequest" }
+      responses:
+        "200":
+          description: Listing marked sold (idempotent on same buyer)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Listing" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerOnly" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/ListingAlreadySold" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/listings/{listing_id}/remove:
+    post:
+      summary: Remove a listing
+      description: |
+        Sets `status: removed`; excluded from browse, `actions: []` for
+        everyone. Seller-only via `acting_user_id`. Lifecycle: remove on
+        active → 200 removed; already-removed → 200 idempotent; sold →
+        409 `listing_already_sold` (cannot remove a completed sale). Owner: P2.
+      operationId: removeListing
+      tags: [listings]
+      parameters:
+        - $ref: "#/components/parameters/ListingId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RemoveRequest" }
+      responses:
+        "200":
+          description: Listing removed (or already removed — idempotent)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Listing" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerOnly" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/ListingAlreadySold" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/reviews:
+    post:
+      summary: Create a review
+      description: |
+        Eligibility is gated on the verified interaction:
+
+        - the author must be the recorded buyer of the referenced listing
+          (`listing.buyer_user_id == author_user_id`) → otherwise 403
+          `review_not_eligible`.
+        - `subject_user_id` (who is reviewed) is **derived server-side** from
+          the listing's `seller_user_id` — the request MUST NOT supply a subject;
+          the server ignoring a client-supplied subject is how the aggregate
+          (the one trust signal in MVP) stays uncorruptible. A verified buyer
+          posting against any subject would poison reputation.
+        - One review per author per listing
+          (`UNIQUE(app_id, author_user_id, listing_id) NULLS NOT DISTINCT`) →
+          duplicate → 409 `review_exists`.
+
+        On write, the derived subject's aggregate is updated
+        (Postgres-authoritative, Redis write-through). Owner: S2.
+      operationId: createReview
+      tags: [reviews]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReviewCreateRequest" }
+      responses:
+        "201":
+          description: Review created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Review" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        default: { $ref: "#/components/responses/Error" }
+    get:
+      summary: List reviews for a subject (seller history)
+      description: "Offset-paginated review history. Owner: P1."
+      operationId: listReviews
+      tags: [reviews]
+      parameters:
+        - $ref: "#/components/parameters/SubjectUserId"
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Page of reviews
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReviewPage" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/reviews/aggregate:
+    get:
+      summary: Aggregate reputation for a subject
+      description: |
+        Postgres-authoritative aggregate with Redis write-through cache and a
+        rebuild path (a Redis-only store has no rebuild — one eviction would
+        silently corrupt seller reputation). `avg_rating` is **null, not 0**,
+        for unrated sellers — avoids rendering a "0-star" seller. Owner: P1.
+
+        Note: this resolves the README's `GET /v1/users/{id}/reputation`
+        sketch — the endpoint lives here so it stays under the `/reviews`
+        router prefix.
+      operationId: getReviewAggregate
+      tags: [reviews]
+      parameters:
+        - $ref: "#/components/parameters/SubjectUserId"
+      responses:
+        "200":
+          description: Aggregate reputation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReviewAggregate" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        default: { $ref: "#/components/responses/Error" }
+
+components:
+  securitySchemes:
+    BazaarHMAC:
+      type: apiKey
+      in: header
+      name: X-Bazaar-Key
+      description: |
+        API key id. Full auth also requires `X-Bazaar-Timestamp` and
+        `X-Bazaar-Signature` (HMAC-SHA256 over method + path + raw query +
+        sha256(body) + timestamp, 300s window, single-use nonce in Redis).
+    ProvisioningBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: provisioning_token
+      description: |
+        One-time provisioning_token from POST /v1/apps (first key only, 15-min TTL).
+        Used as `Authorization: Bearer <token>` to issue the first API key before
+        the integrator has any HMAC secret. Subsequent rotations use BazaarHMAC.
+        Server-side SDK path must never expose this token to browsers — it is a
+        secret that returns exactly once.
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: UUID; retries with the same key never double-create.
+      schema: { type: string, format: uuid }
+    IdempotencyKeyRequired:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: UUID; REQUIRED on POST /v1/listings. Retries never double-create.
+      schema: { type: string, format: uuid }
+    AppId:
+      name: app_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ListingId:
+      name: listing_id
+      in: path
+      required: true
+      description: Prefixed public id (lst_<uuid>).
+      schema: { type: string }
+    KeyId:
+      name: key_id
+      in: path
+      required: true
+      description: The key's public id (bzk_…).
+      schema: { type: string }
+    Lat:
+      name: lat
+      in: query
+      required: false
+      description: |
+        Optional but pairwise with `lng`. Both → geo-filtered feed (recency +
+        proximity, `distance_km` per item); neither → tenant-wide recency
+        feed; exactly one → 400 `validation_failed`.
+      schema: { type: number, minimum: -90, maximum: 90 }
+    Lng:
+      name: lng
+      in: query
+      required: false
+      description: Optional but pairwise with `lat` (see `lat`).
+      schema: { type: number, minimum: -180, maximum: 180 }
+    RadiusKm:
+      name: radius_km
+      in: query
+      required: false
+      schema: { type: number, default: 15, maximum: 50, exclusiveMinimum: 0 }
+    RadiusUnit:
+      name: radius_unit
+      in: query
+      required: false
+      description: |
+        Unit for `radius_km` (`km` default). `mi` is accepted and converted
+        server-side so US integrators don't do the math; internal computation
+        and `distance_km` in responses are always km. The `radius_km` maximum
+        applies after conversion (e.g. with a 50 km cap, `mi` values above
+        ~31 are rejected). Owner: P3.
+      schema: { $ref: "#/components/schemas/RadiusUnit" }
+    PriceMinCents:
+      name: price_min_cents
+      in: query
+      required: false
+      description: "Inclusive minimum price in integer cents (10000 = $100). Owner: P3."
+      schema: { type: integer, minimum: 0 }
+    PriceMaxCents:
+      name: price_max_cents
+      in: query
+      required: false
+      description: "Inclusive maximum price in integer cents. Owner: P3."
+      schema: { type: integer, minimum: 0 }
+    Q:
+      name: q
+      in: query
+      required: false
+      description: Full-text search (tsvector). Min 1, max 200 chars.
+      schema: { type: string, minLength: 1, maxLength: 200 }
+    Category:
+      name: category
+      in: query
+      required: false
+      schema: { $ref: "#/components/schemas/Category" }
+    Condition:
+      name: condition
+      in: query
+      required: false
+      schema: { $ref: "#/components/schemas/Condition" }
+    ViewerUserId:
+      name: viewer_user_id
+      in: query
+      required: false
+      description: When present, each item carries `actions[]` resolved per viewer.
+      schema: { type: string }
+    SellerUserId:
+      name: seller_user_id
+      in: query
+      required: false
+      description: Filter to one seller's listings — powers the seller's Manage view.
+      schema: { type: string }
+    ListingStatusFilter:
+      name: status
+      in: query
+      required: false
+      description: |
+        Filter by status (single-value each; the Manage view makes two
+        calls for active + sold). Default is active-only; sold/removed appear
+        only when explicitly requested.
+      schema: { $ref: "#/components/schemas/ListingStatus" }
+    Sort:
+      name: sort
+      in: query
+      required: false
+      description: |
+        Optional sort: `newest` (default), `price_asc`, `price_desc`. When `q`
+        is present, the server ranks by `relevance` (ts_rank) implicitly — do
+        not pass `sort=relevance`; it is not a legal value in v0.3.0. Sending
+        `sort=relevance` without `q` → 400 `validation_failed`.
+      schema: { $ref: "#/components/schemas/SortOrder" }
+    SubjectUserId:
+      name: subject_user_id
+      in: query
+      required: true
+      description: Opaque integrator user id being reviewed.
+      schema: { type: string }
+    Offset:
+      name: offset
+      in: query
+      required: false
+      description: Results to skip (default 0). An invalid offset → 400, not 500.
+      schema: { type: integer, default: 0, minimum: 0 }
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, default: 20, minimum: 1, maximum: 100 }
+
+  responses:
+    Error:
+      description: Error envelope
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Unauthorized:
+      description: |
+        Authentication failure — one of six granular codes (deliberately
+        granular, decided Aug 4, so integrators can distinguish clock skew
+        from signing bugs from replay): `missing_auth_headers` (any of
+        X-Bazaar-Key / X-Bazaar-Timestamp / X-Bazaar-Signature absent),
+        `unknown_key` (key_id does not resolve to an active key),
+        `malformed_timestamp` (not unix seconds), `stale_timestamp`
+        (outside the 300s window), `invalid_signature` (HMAC does not
+        verify over method + path + query + body hash + timestamp),
+        `replay_detected` (nonce already used — single-use store in Redis).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example:
+            error:
+              code: invalid_signature
+              message: HMAC signature invalid or timestamp outside 300s window.
+              request_id: req_7f2a9c
+    Forbidden:
+      description: Authenticated but not permitted (e.g. review_not_eligible)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example:
+            error:
+              code: review_not_eligible
+              message: Author is not the verified buyer of this listing.
+              request_id: req_2c41b7
+    SellerOnly:
+      description: acting_user_id does not match the listing's seller_user_id
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example:
+            error:
+              code: seller_only
+              message: acting_user_id does not match the listing's seller_user_id.
+              request_id: req_5b2c91
+    NotFound:
+      description: Not found (or cross-tenant — no existence leak)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example:
+            error:
+              code: listing_not_found
+              message: No listing lst_ig_only_55 for this app.
+              request_id: req_c81b40
+    ValidationFailed:
+      description: |
+        Bad input, missing lat/lng pair, invalid offset, or failed image
+        verification.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example:
+            error:
+              code: validation_failed
+              message: lat and lng are required together for geo filtering.
+              request_id: req_31dd08
+    Conflict:
+      description: |
+        One review per author per listing (`review_exists`). On requests
+        sending `Idempotency-Key`, a 409 can also carry `request_in_flight`
+        or `idempotency_mismatch` — see IdempotencyConflict.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example:
+            error:
+              code: review_exists
+              message: Author has already reviewed this listing.
+              request_id: req_44de1a
+    ListingAlreadySold:
+      description: |
+        mark_sold with a different buyer on a listing that is already sold
+        (or removed). On requests sending `Idempotency-Key`, a 409 can also
+        carry `request_in_flight` or `idempotency_mismatch` — see
+        IdempotencyConflict.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example:
+            error:
+              code: listing_already_sold
+              message: Listing lst_a1b2c3d4 is already sold to another buyer.
+              request_id: req_6f0a9d
+    IdempotencyConflict:
+      description: |
+        Idempotency-Key conflict, two codes: `request_in_flight` — a request
+        with this key is still executing; retry after it settles (in-flight
+        markers expire after 300s). `idempotency_mismatch` — the key was
+        reused with a DIFFERENT request body; do not retry, fix the client.
+        A retry of a COMPLETED request is not an error: it returns the stored
+        response with the `X-Idempotency-Replay: true` header. Endpoints whose
+        409 is a domain code (`review_exists`, `listing_already_sold`) keep
+        that response; this component documents the idempotency codes there.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example:
+            error:
+              code: request_in_flight
+              message: A request with this Idempotency-Key is still in progress.
+              request_id: req_5b1e8c
+    RateLimited:
+      description: Per-app token bucket exceeded. Includes Retry-After header.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema: { type: integer, minimum: 1 }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example:
+            error:
+              code: rate_limited
+              message: Per-app quota exceeded for /v1/listings. Retry after 12s.
+              request_id: req_9a0f2e
+
+  schemas:
+    Healthz:
+      type: object
+      required: [status, db, redis]
+      properties:
+        status: { type: string, example: ok }
+        db: { type: string, example: ok }
+        redis: { type: string, example: ok }
+
+    Error:
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code:
+          type: string
+          description: Stable machine-readable code.
+          example: listing_not_found
+        message: { type: string }
+        request_id: { type: string, example: req_9f1c2d }
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error: { $ref: "#/components/schemas/Error" }
+
+    Pagination:
+      type: object
+      description: |
+        Offset pagination envelope. `total` is the full matching count for the
+        filters; `has_more` is `offset + limit < total`.
+      required: [total, limit, offset, has_more]
+      properties:
+        total: { type: integer, minimum: 0, example: 142 }
+        limit: { type: integer, minimum: 1, example: 20 }
+        offset: { type: integer, minimum: 0, example: 0 }
+        has_more: { type: boolean, example: true }
+
+    Category:
+      type: string
+      description: |
+        MVP wedge — high-velocity consumer categories. Wire values are
+        hyphenated per the OpenAPI Spec tab (baby-gear). P3's seed corpus and
+        search TDD must ratify the same literal — mixed hyphen/underscore
+        (like_new vs like-new) is a silent bug. Ratified: hyphens.
+      enum: [furniture, electronics, apparel, baby-gear]
+    Condition:
+      type: string
+      description: |
+        Wire values hyphenated (like-new) per the Spec tab — same ratification
+        note as Category. Actions use underscores (mark_sold, leave_review) as
+        a distinct enum per the Spec tab; the mixed style is intentional across
+        enums, not within one.
+      enum: [new, like-new, good, fair]
+    Currency:
+      type: string
+      description: USD-only in the MVP; widens back to full ISO-4217 in v1 (additive).
+      enum: [USD]
+    ListingStatus:
+      type: string
+      description: |
+        `pending` returns with the v1 offer flow; clients must ignore
+        unrecognized values (forward compatibility).
+      enum: [active, sold, removed]
+    SortOrder:
+      type: string
+      description: |
+        Browse sort. `newest` is the default; `price_asc`, `price_desc`.
+        When `q` is present, the server ranks by `relevance` (ts_rank) as
+        behavior, not as a passable enum value — clients MUST NOT send
+        `sort=relevance`. `relevance` is deliberately absent from this enum to
+        match the doc ("relevance when q present" as behavior). If a client
+        needs explicit control, use `q` presence to switch ranking mode.
+        Search TDD and SDK must not generate `relevance` as a literal.
+      enum: [newest, price_asc, price_desc]
+    RadiusUnit:
+      type: string
+      description: |
+        Unit for `radius_km` (`km` default). `mi` is accepted and converted
+        server-side so US integrators don't do the math; internal computation
+        and `distance_km` in responses are always km. The `radius_km` maximum
+        applies after conversion (e.g. with a 50 km cap, `mi` values above
+        ~31 are rejected). Owner: P3.
+      enum: [km, mi]
+    ListingAction:
+      type: string
+      description: |
+        Resolved server-side per viewer at read time by the shared
+        `resolve_actions()` helper. Non-seller on an active listing →
+        `contact`; seller on own active listing → `edit`, `mark_sold`,
+        `remove`; recorded buyer on a sold listing with no review yet →
+        `leave_review`; everyone else on sold/removed → none (`[]`).
+
+        `contact` is the one action with no Bazaar endpoint behind it — the
+        host app maps it to its own native channel (WhatsApp chat, IG DM).
+        The others map to `PATCH`, `mark_sold`, `remove`, and
+        `POST /v1/reviews`.
+
+        The Contact module is descoped from the MVP: Bazaar stores no contact
+        handles, threads, or offers. `make_offer`/`buy` are p1/v1 additions;
+        clients MUST ignore unrecognized values (forward compatibility).
+      enum: [contact, edit, mark_sold, remove, leave_review]
+
+    AppCreateRequest:
+      type: object
+      required: [name, owner_email]
+      properties:
+        name: { type: string, example: WhatsApp Local Marketplace }
+        owner_email: { type: string, format: email }
+    App:
+      type: object
+      required: [app_id, name, provisioning_token, created_at]
+      properties:
+        app_id: { type: string, format: uuid }
+        name: { type: string }
+        provisioning_token:
+          type: string
+          description: |
+            Single-use token (15-minute TTL) that authenticates the FIRST
+            `POST /v1/apps/{id}/keys` call via `Authorization: Bearer
+            <token>`. Shown exactly once. Key rotation later signs normally.
+          example: bzp_7f2a9c4e1d
+        created_at: { type: string, format: date-time }
+    AppKeyCreated:
+      type: object
+      required: [key_id, secret, created_at]
+      properties:
+        key_id: { type: string, example: bzk_9f1c2d3e }
+        secret:
+          type: string
+          example: bzs_a1b2c3d4e5f6
+          description: Returned exactly once; the server stores only a hash.
+        created_at: { type: string, format: date-time }
+    ApiKeyInfo:
+      type: object
+      required: [key_id, created_at, revoked_at]
+      properties:
+        key_id: { type: string, example: bzk_9f1c2d3e }
+        created_at: { type: string, format: date-time }
+        revoked_at:
+          anyOf:
+            - { type: string, format: date-time }
+            - { type: "null" }
+          description: Null while the key is active.
+    ApiKeyList:
+      type: object
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          items: { $ref: "#/components/schemas/ApiKeyInfo" }
+    ApiKeyRevoked:
+      type: object
+      required: [key_id, revoked_at]
+      properties:
+        key_id: { type: string, example: bzk_9f1c2d3e }
+        revoked_at: { type: string, format: date-time }
+
+    ListingCreateRequest:
+      type: object
+      required: [seller_user_id, title, price_cents, currency, category, condition, lat, lng]
+      properties:
+        seller_user_id: { type: string, example: wa_usr_88f2a1 }
+        title: { type: string, example: UPPAbaby Vista stroller }
+        description: { type: string }
+        price_cents:
+          type: integer
+          minimum: 0
+          description: Integer cents. Floats are rejected.
+          example: 42000
+        currency: { $ref: "#/components/schemas/Currency" }
+        category: { $ref: "#/components/schemas/Category" }
+        condition: { $ref: "#/components/schemas/Condition" }
+        lat: { type: number, minimum: -90, maximum: 90 }
+        lng: { type: number, minimum: -180, maximum: 180 }
+    ListingPatchRequest:
+      type: object
+      description: |
+        All listing fields optional; `acting_user_id` required (seller gate).
+        `lat`/`lng` are pairwise like browse: both or neither; exactly one →
+        400 `validation_failed`. `image_keys` is never client-writable.
+      required: [acting_user_id]
+      properties:
+        acting_user_id:
+          type: string
+          description: Checked against the listing's seller_user_id (403 seller_only).
+        title: { type: string }
+        description: { type: string }
+        price_cents: { type: integer, minimum: 0 }
+        currency: { $ref: "#/components/schemas/Currency" }
+        category: { $ref: "#/components/schemas/Category" }
+        condition: { $ref: "#/components/schemas/Condition" }
+        lat: { type: number, minimum: -90, maximum: 90 }
+        lng: { type: number, minimum: -180, maximum: 180 }
+    Listing:
+      type: object
+      description: |
+        `geohash` is deliberately NOT in the response — it is an internal
+        index detail no integrator needs, and dropping it keeps the
+        geohash-vs-PostGIS decision out of the spec.
+      required: [id, app_id, seller_user_id, title, price_cents, currency, category, condition, status, lat, lng, image_keys, image_urls, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          description: Prefixed public id (lst_<uuid>); DB stores a bare uuid.
+          example: lst_a1b2c3d4
+        app_id: { type: string, format: uuid }
+        seller_user_id: { type: string }
+        title: { type: string }
+        description: { type: string }
+        price_cents: { type: integer }
+        currency: { $ref: "#/components/schemas/Currency" }
+        category: { $ref: "#/components/schemas/Category" }
+        condition: { $ref: "#/components/schemas/Condition" }
+        status: { $ref: "#/components/schemas/ListingStatus" }
+        lat: { type: number }
+        lng: { type: number }
+        image_keys:
+          type: array
+          items: { type: string }
+          description: |
+            Internal R2 object keys, namespaced {app_id}/listings/{listing_id}/.
+            Never client-writable via PATCH. Empty array when no images (not null).
+        image_urls:
+          type: array
+          items: { type: string, format: uri }
+          description: |
+            Public CDN URLs (R2, zero egress), index-aligned with image_keys.
+            Empty array when no images (not null). Use these to render photos.
+            Integrators must ignore extra array entries beyond image_keys length
+            (forward compat if a derived variant is added).
+        buyer_user_id:
+          type: string
+          description: Set on mark_sold — the verified interaction record.
+        actions:
+          type: array
+          items: { $ref: "#/components/schemas/ListingAction" }
+          description: Present when the request carried viewer_user_id.
+        distance_km:
+          type: number
+          description: Present on browse/search responses when geo-filtered.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ListingPage:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/Listing" }
+        pagination: { $ref: "#/components/schemas/Pagination" }
+
+    ImageUploadRequest:
+      type: object
+      required: [acting_user_id, content_type, content_length]
+      description: |
+        Integrators declare type/size up front; server validates actual bytes at
+        attach. Limits: content_length max 10 MiB (10485760 bytes), accepted
+        types: image/jpeg, image/png, image/webp. Rejected at presign time →
+        400 validation_failed. A presigned PUT cannot enforce them, so attach
+        re-checks.
+      properties:
+        acting_user_id:
+          type: string
+          description: Checked against the listing's seller_user_id (403 seller_only).
+        content_type:
+          type: string
+          enum: [image/jpeg, image/png, image/webp]
+          example: image/jpeg
+        content_length:
+          type: integer
+          minimum: 1
+          maximum: 10485760
+          description: Declared byte size; max 10 MiB.
+    ImageAttachRequest:
+      type: object
+      required: [acting_user_id, image_key]
+      properties:
+        acting_user_id:
+          type: string
+          description: Checked against the listing's seller_user_id (403 seller_only).
+        image_key:
+          type: string
+          description: The R2 object key returned by the presign step, to verify and link.
+          example: 9f1c2d3e/listings/lst_a1b2c3d4/7d3e9f10.jpg
+    ImageUpload:
+      type: object
+      required: [upload_url, method, image_key, expires_in]
+      properties:
+        upload_url: { type: string, format: uri }
+        method: { type: string, enum: [PUT] }
+        image_key: { type: string, example: 9f1c2d3e/listings/lst_a1b2c3d4/7d3e9f10.jpg }
+        expires_in: { type: integer, example: 900 }
+
+    MarkSoldRequest:
+      type: object
+      required: [acting_user_id, buyer_user_id]
+      properties:
+        acting_user_id:
+          type: string
+          description: Checked against the listing's seller_user_id (403 seller_only).
+        buyer_user_id: { type: string, example: wa_usr_4b90cd }
+    RemoveRequest:
+      type: object
+      required: [acting_user_id]
+      properties:
+        acting_user_id:
+          type: string
+          description: Checked against the listing's seller_user_id (403 seller_only).
+
+    ReviewCreateRequest:
+      type: object
+      description: |
+        `subject_user_id` is NOT accepted from the client — it is derived
+        server-side from `listing.seller_user_id`. This closes the trust-loop
+        hole where a verified buyer could post against any subject.
+      required: [author_user_id, listing_id, rating]
+      properties:
+        author_user_id:
+          type: string
+          description: Must equal the listing's recorded buyer_user_id.
+        listing_id:
+          type: string
+          description: Prefixed listing id (lst_<uuid>) the review is anchored to.
+        rating: { type: integer, minimum: 1, maximum: 5 }
+        body: { type: string }
+    Review:
+      type: object
+      required: [id, app_id, subject_user_id, author_user_id, listing_id, rating, created_at]
+      description: |
+        MVP reviews are always listing-anchored (listing_id required). The DB
+        column is nullable for the UNIQUE ... NULLS NOT DISTINCT constraint,
+        but the API shape is non-null.
+      properties:
+        id:
+          type: string
+          description: Prefixed public id (rev_<uuid>); DB stores a bare uuid.
+          example: rev_b2c3d4e5
+        app_id: { type: string, format: uuid }
+        subject_user_id:
+          type: string
+          description: Derived server-side from the listing's seller_user_id (not client-supplied).
+        author_user_id: { type: string }
+        listing_id:
+          type: string
+          description: Prefixed listing id (lst_<uuid>) the review is anchored to; empty when unanchored is v1.
+        rating: { type: integer, minimum: 1, maximum: 5 }
+        body: { type: string }
+        created_at: { type: string, format: date-time }
+    ReviewPage:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/Review" }
+        pagination: { $ref: "#/components/schemas/Pagination" }
+    ReviewAggregate:
+      type: object
+      required: [subject_user_id, avg_rating, review_count, rating_counts]
+      properties:
+        subject_user_id: { type: string }
+        avg_rating:
+          type: [number, "null"]
+          description: 1 decimal; null (not 0) when review_count == 0.
+          example: 4.8
+        review_count: { type: integer, example: 23 }
+        rating_counts:
+          type: object
+          description: Histogram keyed by rating ("1".."5").
+          additionalProperties: { type: integer }
+          example: { "1": 0, "2": 0, "3": 1, "4": 4, "5": 18 }
+
+security:
+  - BazaarHMAC: []

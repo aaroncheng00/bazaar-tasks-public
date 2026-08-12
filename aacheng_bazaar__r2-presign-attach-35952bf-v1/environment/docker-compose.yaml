@@ -1,0 +1,49 @@
+services:
+  postgres:
+    image: public.ecr.aws/docker/library/postgres:16@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+    environment:
+      POSTGRES_USER: bazaar
+      POSTGRES_PASSWORD: bazaar
+      POSTGRES_DB: bazaar
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./repo/infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bazaar -d bazaar"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  redis:
+    image: public.ecr.aws/docker/library/redis:7@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  main:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      BAZAAR_DATABASE_URL: postgresql+asyncpg://bazaar:bazaar@postgres:5432/bazaar
+      BAZAAR_APP_DATABASE_URL: postgresql+asyncpg://bazaar_app:bazaar_app@postgres:5432/bazaar
+      BAZAAR_REDIS_URL: redis://redis:6379/0
+      BAZAAR_ENV: dev
+      BAZAAR_KEYS: '{"bzk_test": {"secret": "bzs_test_secret", "app_id": "app-a"}}'
+      BAZAAR_KEY_ENCRYPTION_SECRET: dev-key-encryption-secret-change-me
+      R2_ENDPOINT: http://localhost:9000
+      R2_BUCKET: bazaar-media
+      R2_ACCESS_KEY_ID: minio
+      R2_SECRET_ACCESS_KEY: minio123
+      PYTHONPATH: /app/apps/api/src
+    command: sleep infinity
+
+volumes:
+  pgdata:

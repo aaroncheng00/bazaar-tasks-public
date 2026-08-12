@@ -1,0 +1,12 @@
+{
+  "name": "@bazaar/api",
+  "private": true,
+  "scripts": {
+    "gen": "uv run python -m bazaar_api._maint.gen_models",
+    "gen:check": "uv run python -m bazaar_api._maint.gen_models --check",
+    "check:spec": "uv run python -m bazaar_api._maint.check_spec_drift && uv run python -m bazaar_api._maint.gen_models --check",
+    "lint": "uv run ruff check . && uv run ruff format --check .",
+    "typecheck": "uv run mypy",
+    "test": "uv run pytest"
+  }
+}

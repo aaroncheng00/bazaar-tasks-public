@@ -1,0 +1,7 @@
+# Recommended ruleset with one documented exception: the spec deliberately
+# has no `servers:` block (it is consumed in-repo; the SDK takes a baseUrl),
+# so no-empty-servers is off. Everything else stays at recommended severity.
+extends:
+  - recommended
+rules:
+  no-empty-servers: off
