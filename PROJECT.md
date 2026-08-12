@@ -1,11 +1,17 @@
 # PROJECT — Lab Configuration
 
-> Fill this file in when you adopt the template. It is the **only file you must edit**
-> to get started. Every other file is either shared infrastructure (`CORE_STANDARDS.md`)
-> or track guidance (`GOLD_STANDARD.md`). Keep this file small — its smallness is the product.
+> **Already filled for the Bazaar pod. Joining? You do not need to edit this file.**
+> It holds *lab-level* config only — values that are the same for every author and
+> every task. Change it when lab-level facts change (repo moves, new owner, domain
+> notes go stale), not when you start a task.
+>
+> Per-task values (task dir, slug, author handle, base commit) deliberately live
+> **on the card**, not here — see `pipeline/cards/`. A shared config file cannot hold
+> five authors' current task without conflicting.
 
-This file holds the per-lab config surface. Replace every placeholder below with your lab's values.
-Comments show worked examples. After you finish, no placeholder should remain in any command you run.
+Everything else is either shared infrastructure (`CORE_STANDARDS.md` — nobody downstream
+edits) or track guidance (`GOLD_STANDARD.md` — track owner, rarely). Keep this file small;
+its smallness is the product.
 
 ---
 
@@ -13,22 +19,16 @@ Comments show worked examples. After you finish, no placeholder should remain in
 
 - **Lab name:** `Bazaar`
 - **Track:** `swe-bench`
-- **Owner / contact:** `aacheng`
+- **Owner / contact:** `vetaylor`
 
 ## Repos and paths
 
 - **Product repo (the system under test):** `https://github.com/metainternal-aai/aai_labs_bazaar`
 - **Task repo (where tasks live):** `https://github.com/codimango/bazaar-swe-aai-pipeline`
 - **Task skeletons:** shipped in-repo as `single_turn_template/` and `multi_turn_template/` — upstream: github.com/codimango/swe-bench-pro-template
-- **Local checkout path for product repo:** `/home/aacheng/aai_labs_bazaar`
-- **Local checkout path for task repo:** `/home/aacheng/aacheng-swe-aai-pipeline`
-
-## Task authoring knobs
-
-- **Base commit for new tasks:** `35952bf`  <!-- origin/main head (K3 hardening merged), where images.py is still 501 stub -->
-- **Task directory name for next idea:** `aacheng_bazaar__r2-presign-attach-35952bf-v1` <!-- e.g. example-schema-migration-chain -->
-- **Author handle for cards:** `aacheng`
-- **Token file for credless builds (gitignored):** `~/.aacheng_gh_token`
+- **Local checkout paths:** per-person, wherever you cloned them. Several task-dir
+  commands assume the product repo is checked out beside the task repo; keep both
+  under one parent dir and the relative paths in `prompts/` work unchanged.
 
 ## Docs and roster
 

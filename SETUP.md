@@ -1,20 +1,31 @@
-# SETUP — Fill-in Checklist (~15 min)
+# SETUP — Onboarding Checklist (~20 min)
 
 Complete these steps in order. Every item is a checkbox with an exact command or edit.
 When done, `pipeline/checks/run_all.sh` passes and you have your first card.
 
+> **Joining the Bazaar pod? Skip §1 — it is already done.** Start at §2.
+> §1 only applies if you are standing up a *new* lab from the template.
+
 ---
 
-## 1. Fill `PROJECT.md` — the only required edit
+## 1. Lab config — already done for Bazaar
 
-- [ ] Open [`PROJECT.md`](PROJECT.md) and replace every placeholder (see table below).
-      Each field has a comment with a worked example.
-- [ ] Save and verify no placeholder remains in commands:
+`PROJECT.md` is filled at the pod level: lab identity, product repo, task repo, domain
+notes. **A joining author does not edit it.**
+
+- [ ] Read [`PROJECT.md`](PROJECT.md) once, for the domain notes — where Bazaar bugs
+      actually hide. That is the part worth two minutes.
+- [ ] Confirm it is complete:
   ```bash
   grep -oE "<[A-Z][A-Z0-9_]+>" PROJECT.md || echo "PROJECT.md has no placeholders left — good"
   ```
 
-Expected values: see Placeholder Reference at the bottom of this file.
+Per-task values (`<TASK_DIR>`, `<TASK_SLUG>`, `<AUTHOR>`, base commit) are **not** in
+`PROJECT.md` — they live on your card and you supply them when you run a prompt. See the
+Placeholder Reference at the bottom for which is which.
+
+*Standing up a new lab?* Then `PROJECT.md` is your one required edit: replace every
+placeholder using the same reference table.
 
 ---
 
@@ -45,7 +56,7 @@ Expected values: see Placeholder Reference at the bottom of this file.
   The two skeletons ship in-repo so you don't need a second clone. Upstream single-turn skeletons exist at `codimango/swe-bench-pro-template` etc., but the multi-turn layout has no upstream equivalent — it's ours to maintain. See Skeletons sync status below.
 
 - [ ] Understand the two placeholder conventions:
-  - Pipeline placeholders: `<ANGLE_BRACKET_CAPS>` like `<PROJECT_REPO>`, `<TASK_SLUG>` — listed in the table below, replaced once in `PROJECT.md`.
+  - Pipeline placeholders: `<ANGLE_BRACKET_CAPS>` like `<PROJECT_REPO>`, `<TASK_SLUG>` — listed in the table below. **Lab-level** ones are already resolved in `PROJECT.md`; **per-task** ones you substitute yourself each time you run a prompt, using the values on your card.
   - Skeleton placeholders: `@@FILL:...@@` and task-internal `<...>` like `@@FILL:task-slug@@`, `@@FILL:40-hex commit...@@`, `<INPUT>`, `<WANT>` — these stay inside `single_turn_template/` and `multi_turn_template/` until you copy one to a real task dir and fill them. `grep -r "@@FILL" single_turn_template` shows everything you must replace.
 
 - [ ] Optional upstream diff (single-turn only):
@@ -63,33 +74,41 @@ Expected values: see Placeholder Reference at the bottom of this file.
   ```bash
   pipeline/checks/run_all.sh
   ```
-  Expected: `3 checks passed, 0 failed` and exit `0`. If any check fails, fix the file it names.
+  Expected: `4 checks passed, 0 failed` and exit `0`. If any check fails, fix the file it names.
+
+  These verify plumbing only — card schema, audit tags, `before_repo_set_cmd`, solution
+  paths. **A green run says nothing about whether your task is any good.**
 
 ---
 
 ## 5. Run the first ideation prompt
 
+- [ ] **Read the board first** — `ls pipeline/cards/`. It is the only dedupe mechanism;
+      do not propose against a commit someone already claimed.
 - [ ] Open [`prompts/README.md`](prompts/README.md) for the placeholder convention.
-- [ ] Run the first prompt from the task repo root:
+- [ ] Run the first prompt from the task repo root, pointed at **your own** commits:
   ```bash
   cat prompts/05-ideate-commits-and-prs.md
-  # copy the prompt body into your model (every lab has commits on day one;
-  # the other sources need a review backlog or accepted-task corpus)
+  # copy the prompt body into a 1P model. You card your own commits by default —
+  # you know why the obvious approach was wrong, and that is the trap.
   ```
-- [ ] Save the model's output as your first card (name it `<project>-<slug>-<author>.md`):
+- [ ] Save the output as your first card, named `bazaar-<slug>-<author>.md`:
   ```bash
-  cp pipeline/cards/_TEMPLATE.md pipeline/cards/example-card-alice.md
-  # edit front matter: status=proposed, slug, author, etc. (see PROJECT.md)
+  cp pipeline/cards/_TEMPLATE.md pipeline/cards/bazaar-<slug>-<author>.md
+  # front matter: status=proposed, slug, author (your handle), base_commit, task_dir,
+  # novelty_risk, difficulty_hypothesis — state the last two BEFORE you build anything.
   ```
 
 ---
 
 ## 6. What "done" looks like
 
-- `PROJECT.md` has no `<...>` placeholders left (the grep above is clean).
-- `pipeline/checks/run_all.sh` exits `0`.
-- One real card exists in `pipeline/cards/` (named `<project>-<slug>-<author>.md`) with `status: proposed`.
-- You can run `codimango bench validate --structural-only -p ./example-task-dir` on a skeleton copy and it is structural-green.
+- `pipeline/checks/run_all.sh` exits `0` (4 passed).
+- `codimango --help` works.
+- One real card exists in `pipeline/cards/` named `bazaar-<slug>-<author>.md` with
+  `status: proposed`, and its `difficulty_hypothesis` is filled in.
+- You can run `codimango bench validate --structural-only -p ./<TASK_DIR>` on a skeleton
+  copy and it is structural-green.
 
 You are now ready for the four-step recipe in [`README.md`](README.md). The next gate is human: approve the levers before scaffolding.
 
@@ -109,29 +128,33 @@ The single-turn skeleton is a vendored copy of the org's published template; the
 ## Placeholder Reference
 
 Every pipeline placeholder that appears in this repo is listed here with an example value.
-After `PROJECT.md` is filled, no placeholder should remain in any command you run.
+
+**Two scopes.** *Lab-level* placeholders are resolved once in `PROJECT.md` and are already
+done for Bazaar. *Per-task* placeholders change with every task and every author — they
+live on your card, and you substitute them by hand when you run a prompt. Do not put
+per-task values in `PROJECT.md`; five authors cannot share one "current task".
 
 Skeleton placeholders (`@@FILL:...@@`, `<INPUT>`, `<WANT>`, etc.) use a separate convention inside `single_turn_template/` and `multi_turn_template/` — see §3 above. They are not listed here.
 
-| Placeholder | Example value | Notes |
-|---|---|---|
-| `<LAB_NAME>` | `example-lab` | Your lab handle |
-| `<TRACK>` | `swe-bench` | This track; also `t-bench` or `ml-bench` in sibling templates |
-| `<OWNER>` | `alice@example.com` | Contact for this adoption |
-| `<PROJECT_REPO>` | `github.com/codimango/example-service` | System under test |
-| `<PROJECT_REPO_NAME>` | `example-service` | Repo name without org (de-identified) |
-| `<EXAMPLE_TASK>` | `example-task` | Example task slug (de-identified) |
-| `<PROJECT>` | `example-project` | Generic project prefix |
-| `<TASK_REPO>` | `github.com/codimango/example-bench-tasks` | Where tasks live |
-| `<SKELETON_REPO>` | `github.com/codimango/swe-bench-pro-template` | Upstream skeleton reference (skeletons now ship in-repo) |
-| `<PROJECT_PATH>` | `./example-service` | Local checkout path |
-| `<TASK_PATH>` | `./example-bench-tasks` | Local checkout path |
-| `<BASE_COMMIT>` | `abc1234def5678` | Pinned commit where feature is absent |
-| `<TASK_SLUG>` | `example-schema-migration-chain` | Illustrative generic slug |
-| `<TASK_DIR>` | `./example-task-slug` | Local dir for a new task (same slug) |
-| `<AUTHOR>` | `alice` | Card author handle |
-| `<GH_TOKEN_FILE>` | `~/.example_gh_token` | Gitignored token file for Docker builds |
-| `<ROSTER_PATH>` | `README.md` | Task roster location |
+| Placeholder | Scope | Example value | Notes |
+|---|---|---|---|
+| `<LAB_NAME>` | lab | `Bazaar` | Your lab handle |
+| `<TRACK>` | lab | `swe-bench` | This track; also `t-bench` or `ml-bench` in sibling templates |
+| `<OWNER>` | lab | `alice@example.com` | Contact for this adoption |
+| `<PROJECT_REPO>` | lab | `github.com/codimango/example-service` | System under test |
+| `<PROJECT_REPO_NAME>` | lab | `example-service` | Repo name without org (de-identified) |
+| `<EXAMPLE_TASK>` | lab | `example-task` | Example task slug (de-identified) |
+| `<PROJECT>` | lab | `example-project` | Generic project prefix |
+| `<TASK_REPO>` | lab | `github.com/codimango/example-bench-tasks` | Where tasks live |
+| `<SKELETON_REPO>` | lab | `github.com/codimango/swe-bench-pro-template` | Upstream skeleton reference (skeletons now ship in-repo) |
+| `<PROJECT_PATH>` | local | `./example-service` | Your product-repo checkout |
+| `<TASK_PATH>` | local | `./example-bench-tasks` | Your task-repo checkout |
+| `<GH_TOKEN_FILE>` | local | `~/.bazaar_gh_token` | Gitignored token file for Docker builds; per-person path |
+| `<BASE_COMMIT>` | **task** | `abc1234def5678` | Commit where the feature is absent — from your card's `base_commit` |
+| `<TASK_SLUG>` | **task** | `example-schema-migration-chain` | Your card's `slug` |
+| `<TASK_DIR>` | **task** | `./example-task-slug` | Your card's `task_dir` |
+| `<AUTHOR>` | **task** | `alice` | Your handle — the card filename suffix |
+| `<ROSTER_PATH>` | lab | `README.md` | Task roster location |
 | `<NET_NEW_TEST_PATHS>` | `tests/new_suite.py` | Example net-new test file cleared by `before_repo_set_cmd` |
 | `<EXISTING_PATH>` | `existing/module.py` | Example pre-existing file restored via `git checkout` |
 | `<PKG>` | `solver` | Example package name |
