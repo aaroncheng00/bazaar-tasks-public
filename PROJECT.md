@@ -18,7 +18,7 @@ Comments show worked examples. After you finish, no placeholder should remain in
 ## Repos and paths
 
 - **Product repo (the system under test):** `https://github.com/metainternal-aai/aai_labs_bazaar`
-- **Task repo (where tasks live):** `<github.com/codimango/aacheng-swe-aai-pipeline`
+- **Task repo (where tasks live):** `https://github.com/codimango/bazaar-swe-aai-pipeline`
 - **Task skeletons:** shipped in-repo as `single_turn_template/` and `multi_turn_template/` — upstream: github.com/codimango/swe-bench-pro-template
 - **Local checkout path for product repo:** `/home/aacheng/aai_labs_bazaar`
 - **Local checkout path for task repo:** `/home/aacheng/aacheng-swe-aai-pipeline`
