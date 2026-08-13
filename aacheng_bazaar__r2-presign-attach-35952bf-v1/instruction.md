@@ -2,54 +2,46 @@
 
 ## Context
 
-Bazaar is a headless FastAPI marketplace API (P2P). All `/v1` routes are HMAC-authenticated (`X-Bazaar-Key` / `Timestamp` / `Signature`, 300s skew, Redis single-use nonce), tenant-scoped via `current_app_id()` + Postgres RLS (`FORCE RLS` on `listings`), and idempotent via `Idempotency-Key` header using `IdempotentRoute`.
+Bazaar is a headless FastAPI marketplace API (P2P). All `/v1` routes are HMAC-authenticated (`X-Bazaar-Key` / `Timestamp` / `Signature`, 300s window, single-use nonce via Redis), tenant-scoped via `current_app_id()` + Postgres RLS (`FORCE RLS` on `listings`), and idempotent via `Idempotency-Key` using `IdempotentRoute`.
 
 On base commit `35952bfad071179dece536ae828761d9e2883162`, `apps/api/src/bazaar_api/modules/listings/images.py` is stubbed to 501 for both:
 - `POST /v1/listings/{listing_id}/images` — request upload URL
 - `POST /v1/listings/{listing_id}/images/attach` — verify and link
 
-Real behavior is in `spec/openapi.yaml`: presign takes `ImageUploadRequest{acting_user_id, content_type, content_length}` and returns `ImageUpload{upload_url, method, image_key, expires_in}`; attach takes `ImageAttachRequest{acting_user_id, image_key}` and returns `Listing` with `image_keys` appended.
-
 R2 is Cloudflare R2, locally emulated by Minio (`R2_ENDPOINT`, `R2_BUCKET`, etc. from `.env.example`).
 
 ## Task
 
-Implement the two handlers replacing the 501 stubs, plus `reap_orphans()` helper, in `apps/api/src/bazaar_api/modules/listings/images.py`.
+Implement the two handlers replacing the 501 stubs, plus `reap_orphans()` helper.
 
 **Requirements:**
 
-1. **Tenant isolation:** `listing_id` format is `lst_<uuid>`. Invalid format or unknown id → 404 `listing_not_found` (no leak). All DB access must go through the RLS-scoped session (`tenant_session` dependency). The authenticated `app_id` from HMAC must match the listing's `app_id` — cross-tenant access must be 404.
+1. **Tenant isolation:** `listing_id` is `lst_<uuid>`, invalid or unknown → 404 `listing_not_found` no leak. All DB access must be via RLS-scoped session. Authenticated `app_id` must match listing's `app_id`.
 
-2. **Seller-only:** `acting_user_id` from body must equal listing's `seller_user_id`, else 403 `seller_only`. `acting_user_id` is body field, never header.
+2. **Seller-only:** `acting_user_id` from body must equal `seller_user_id`, else 403 `seller_only`. Never trust header.
 
-3. **Presign validation:** Allow only `image/jpeg`, `image/png`, `image/webp` and `content_length` in `[1, 10MiB]` else 400 `validation_failed`. If listing is not `active` (sold/removed) → 409 `listing_already_sold`.
+3. **Presign:** Validate content-type in allowed images and content-length ≤10MiB else 400. If listing not active → 409. Generate tenant-namespaced key and presigned PUT URL (expires ~15min). Track pending uploads in Redis for verification/reaper — use key `pending_image:{app_id}:{image_key}` with content metadata and `created_at` (TTL couple days). Tests may inject `actual_*` fields to simulate HEAD mismatch.
 
-4. **Key namespace:** Generated `image_key` must be namespaced by tenant to prevent guessing — include `app_id` and `listing_id` plus a random component and proper file extension.
+4. **Attach-verify:** Key must be namespaced, else 404. Verify seller, check object existence via R2 HEAD if available else pending, reject wrong actual type/size → 400, append key to `listings.image_keys` (JSONB, not array) and return updated `Listing`.
 
-5. **Presigned URL:** Return `method=PUT`, `expires_in=900`, and a presigned PUT URL for the generated key (boto3 if R2 config present, otherwise a deterministic fallback). Persist pending metadata in Redis for attach verification and reaper: use key `pending_image:{app_id}:{image_key}` with at least `content_type`, `content_length`, `created_at` ISO (TTL a couple days). Tests may inject `actual_content_type`/`actual_content_length` into that JSON to simulate a HEAD mismatch.
+5. **Idempotency:** Preserve `IdempotentRoute`. Same `Idempotency-Key` + same body replays original response.
 
-6. **Attach-verify:** `image_key` must be namespaced to the requesting app/listing, else 404. Verify listing exists and seller check as above. Determine actual content-type/size — try R2 `head_object` if client available, otherwise fall back to the pending Redis entry (use `actual_*` fields if present, else `content_*`). If no object found → 404. If actual type not allowed or size >10MiB → 400 `validation_failed`. On success, append (not overwrite) the key to `listings.image_keys` (JSONB column) and return the updated `Listing` with `image_urls` derived from keys.
-
-7. **Idempotency:** Router already uses `IdempotentRoute`. Same `Idempotency-Key` + same body must replay original response, not allocate a new key. Note: HMAC signatures are single-use nonces — a retry with same timestamp reuses the signature and is rejected as replay before it reaches idempotency. A correct client re-signs with a fresh timestamp while keeping the Idempotency-Key stable.
-
-8. **Orphan reaper:** `async def reap_orphans() -> int` scans Redis keys `pending_image:*`, collects referenced keys from `SELECT image_keys FROM listings`, deletes pending older than 24h that are not referenced and deletes the R2 object via `delete_object` if client exists. Return count.
+6. **Orphan reaper:** `async def reap_orphans() -> int` scans `pending_image:*`, collects referenced keys from listings, deletes pending older than 24h not referenced, deletes R2 object if possible.
 
 ## Constraints
 
-- Only modify `apps/api/src/bazaar_api/modules/listings/images.py`.
-- Preserve `IdempotentRoute` on router.
-- Use `current_app_id()` for tenant, not header parsing.
-- `image_keys` must be appended, never overwritten.
+- Only modify `images.py`.
+- Preserve `IdempotentRoute`, use `current_app_id()`.
+- `image_keys` appended, never overwritten.
 
 ## Out of scope
 
-- Real R2 bucket creation — Minio is local fake. Tests may mock HEAD or inject mismatch via pending metadata.
-- Frontend.
+- Real R2 creation — Minio is fake. Tests mock HEAD or use Redis injection.
 
 ## Acceptance
 
-- Presign returns 200 with key prefixed by `{app_id}/listings/{listing_id}/`, method PUT, expires 900
-- Attach with mismatched actual type → 400, with correct → 200 and `image_keys` appended (len 1→2)
-- Cross-tenant presign → 404, seller mismatch → 403, sold listing → 409 (if implemented)
-- Same idempotency key replay returns same `image_key`
-- Reaper deletes only unattached >24h pending
+- Presign returns 200 with namespaced key, PUT method, ~900s expiry
+- Attach wrong actual type → 400, correct → 200 and appends
+- Cross-tenant → 404, seller mismatch → 403
+- Idempotency replay same body → same key; same sig reuse → HMAC 401 before idempotency
+- Reaper deletes only unattached old pending
