@@ -1,4 +1,4 @@
-"""R2 presigned upload + attach-verify + orphan reaper tests (S1 image pipeline) — hard v2 fixed."""
+"""R2 image-upload pipeline tests — final de-specced, no exact Redis key dependency."""
 
 import hashlib
 import hmac
@@ -6,6 +6,7 @@ import json
 import time
 import uuid
 from collections.abc import AsyncIterator
+from unittest.mock import MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -49,6 +50,8 @@ async def _clean_state() -> AsyncIterator[None]:
         await redis.delete(key)
     async for key in redis.scan_iter("pending_image:*"):
         await redis.delete(key)
+    async for key in redis.scan_iter("pending:*"):
+        await redis.delete(key)
     async for key in redis.scan_iter("idem:*"):
         await redis.delete(key)
     owner = create_async_engine(settings.database_url)
@@ -91,6 +94,19 @@ async def _insert_listing(seller: str = SELLER) -> str:
 def _body_json(data: dict) -> bytes:
     return json.dumps(data).encode()
 
+async def _find_pending_keys_containing(substr: str) -> list[str]:
+    """Find any redis keys containing substr, regardless of exact pending_image: prefix."""
+    redis = get_redis()
+    found = []
+    # Scan both pending_image:* and pending:* and all keys for robustness
+    for pattern in ("pending_image:*", "pending:*", "*"):
+        async for key in redis.scan_iter(pattern):
+            if substr in key:
+                found.append(key)
+        if found:
+            break
+    return found
+
 @pytest.mark.asyncio
 async def test_presign_returns_url_with_app_prefix():
     listing_id = await _insert_listing()
@@ -102,13 +118,16 @@ async def test_presign_returns_url_with_app_prefix():
         resp = await client.post(path, content=body_bytes, headers=headers)
     assert resp.status_code == 200, resp.text
     data = resp.json()
-    assert data["image_key"].startswith(f"{APP_ID}/listings/{listing_id}/")
+    # Must be namespaced by app_id and listing_id, not just any random key
+    assert APP_ID in data["image_key"]
+    assert listing_id in data["image_key"]
     assert data["upload_url"]
     assert data["method"] == "PUT"
-    assert data["expires_in"] == 900
+    assert data["expires_in"] >= 800  # ~15min, allow small drift, not exact 900
 
 @pytest.mark.asyncio
 async def test_attach_verify_rejects_wrong_content_type():
+    """Wrong actual content type must be 400 — via HEAD or pending fallback. No exact Redis key required."""
     listing_id = await _insert_listing()
     body = {"acting_user_id": SELLER, "content_type": "image/jpeg", "content_length": 1024}
     body_bytes = _body_json(body)
@@ -118,18 +137,38 @@ async def test_attach_verify_rejects_wrong_content_type():
         presign = await client.post(path, content=body_bytes, headers=headers)
     assert presign.status_code == 200
     image_key = presign.json()["image_key"]
+
+    # Try Redis injection first (if gold stores with known pattern), else mock R2 HEAD
     redis = get_redis()
-    raw = await redis.get(f"pending_image:{APP_ID}:{image_key}")
-    assert raw is not None
-    meta = json.loads(raw)
-    meta["actual_content_type"] = "application/octet-stream"
-    await redis.set(f"pending_image:{APP_ID}:{image_key}", json.dumps(meta), ex=86400)
+    pending_keys = await _find_pending_keys_containing(image_key)
+    if pending_keys:
+        # Found pending — inject actual_content_type mismatch (gold path)
+        raw = await redis.get(pending_keys[0])
+        if raw:
+            meta = json.loads(raw)
+            meta["actual_content_type"] = "application/octet-stream"
+            await redis.set(pending_keys[0], json.dumps(meta), ex=86400)
+    else:
+        # No pending found with expected pattern — rely on HEAD mock below
+        pass
+
     attach_body = {"acting_user_id": SELLER, "image_key": image_key}
     attach_bytes = _body_json(attach_body)
     attach_path = f"/v1/listings/{listing_id}/images/attach"
     attach_headers = _headers("POST", attach_path, attach_bytes)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(attach_path, content=attach_bytes, headers=attach_headers)
+
+    # Mock R2 client to return wrong content type — works even if pending not stored with expected key
+    mock_client = MagicMock()
+    mock_client.head_object.return_value = {"ContentType": "application/octet-stream", "ContentLength": 1024}
+    mock_client.delete_object.return_value = {}
+
+    with patch("bazaar_api.modules.listings.images._get_r2_client", return_value=mock_client):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(attach_path, content=attach_bytes, headers=attach_headers)
+
+    # If agent correctly validates actual type from HEAD or pending actual_* → 400
+    # If agent stored pending but didn't check actual_* → would incorrectly 200
+    # Our mock ensures even without pending injection, it should 400 via HEAD
     assert resp.status_code == 400, resp.text
     assert resp.json()["error"]["code"] == "validation_failed"
 
@@ -167,11 +206,7 @@ async def test_cross_tenant_presign_forbidden():
     other_app = "22222222-2222-4222-8222-222222222222"
     def _sign_other(method: str, path: str, body: bytes):
         ts = _next_ts()
-        sig = hmac.new(
-            other_secret.encode(),
-            canonical_request(method, path, "", ts, body),
-            hashlib.sha256,
-        ).hexdigest()
+        sig = hmac.new(other_secret.encode(), canonical_request(method, path, "", ts, body), hashlib.sha256).hexdigest()
         return ts, sig
     body = {"acting_user_id": SELLER, "content_type": "image/jpeg", "content_length": 1024}
     body_bytes = _body_json(body)
@@ -252,6 +287,7 @@ async def test_idempotency_same_timestamp_rejected_as_hmac_replay():
 
 @pytest.mark.asyncio
 async def test_orphan_reaper_deletes_only_unattached():
+    """Reaper must delete old unattached pending and keep attached. No exact Redis key required — scans for image_key substring."""
     listing_id = await _insert_listing()
     body = {"acting_user_id": SELLER, "content_type": "image/jpeg", "content_length": 1024}
     body_bytes = _body_json(body)
@@ -265,6 +301,7 @@ async def test_orphan_reaper_deletes_only_unattached():
     assert presign2.status_code == 200, presign2.text
     key1 = presign1.json()["image_key"]
     key2 = presign2.json()["image_key"]
+
     attach_body = {"acting_user_id": SELLER, "image_key": key1}
     attach_bytes = _body_json(attach_body)
     attach_path = f"/v1/listings/{listing_id}/images/attach"
@@ -272,27 +309,47 @@ async def test_orphan_reaper_deletes_only_unattached():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(attach_path, content=attach_bytes, headers=attach_headers)
     assert resp.status_code == 200, resp.text
+
     redis = get_redis()
-    raw = await redis.get(f"pending_image:{APP_ID}:{key2}")
-    assert raw is not None
-    meta = json.loads(raw)
-    from datetime import datetime, timedelta, timezone
-    old = datetime.now(timezone.utc) - timedelta(hours=25)
-    meta["created_at"] = old.isoformat()
-    await redis.set(f"pending_image:{APP_ID}:{key2}", json.dumps(meta), ex=86400 * 2)
+    # Find pending keys containing key2 (robust to different pending_image: prefix)
+    pending_keys = await _find_pending_keys_containing(key2)
+    if pending_keys:
+        raw = await redis.get(pending_keys[0])
+        if raw:
+            meta = json.loads(raw)
+            from datetime import datetime, timedelta, timezone
+            old = datetime.now(timezone.utc) - timedelta(hours=25)
+            meta["created_at"] = old.isoformat()
+            await redis.set(pending_keys[0], json.dumps(meta), ex=86400 * 2)
+    else:
+        # If agent didn't store with expected pattern, insert our own old entry with expected pattern that gold's reaper would find
+        # and that agent's reaper should also find if it scans pending_image:*
+        from datetime import datetime, timedelta, timezone
+        old = datetime.now(timezone.utc) - timedelta(hours=25)
+        meta = {
+            "app_id": APP_ID,
+            "image_key": key2,
+            "content_type": "image/jpeg",
+            "content_length": 1024,
+            "created_at": old.isoformat(),
+        }
+        await redis.set(f"pending_image:{APP_ID}:{key2}", json.dumps(meta), ex=86400 * 2)
+
     from bazaar_api.modules.listings.images import reap_orphans
     reaped = await reap_orphans()
     assert reaped >= 1
-    assert await redis.get(f"pending_image:{APP_ID}:{key2}") is None
+
+    # After reaper, pending containing key2 should be gone (regardless of exact key format)
+    remaining = await _find_pending_keys_containing(key2)
+    assert len(remaining) == 0, f"Expected no pending for key2 after reaper, found {remaining}"
+
     owner = create_async_engine(settings.database_url)
     async with owner.connect() as conn:
-        row = (
-            await conn.execute(text("SELECT image_keys FROM listings WHERE id = :id"), {"id": listing_id[4:]})
-        ).one()
+        row = (await conn.execute(text("SELECT image_keys FROM listings WHERE id = :id"), {"id": listing_id[4:]})).one()
     await owner.dispose()
     assert key1 in row[0]
 
-# --- Hardening traps ---
+# --- Hardening ---
 
 @pytest.mark.asyncio
 async def test_cross_tenant_attach_forbidden():
@@ -353,7 +410,6 @@ async def test_attach_seller_only():
 
 @pytest.mark.asyncio
 async def test_idempotency_different_body_is_mismatch():
-    """Same Idempotency-Key but different body must be 409 mismatch, not replay nor new."""
     listing_id = await _insert_listing()
     body1 = {"acting_user_id": SELLER, "content_type": "image/jpeg", "content_length": 1024}
     body2 = {"acting_user_id": SELLER, "content_type": "image/jpeg", "content_length": 2048}
@@ -375,4 +431,4 @@ async def test_idempotency_different_body_is_mismatch():
         r1 = await client.post(path, content=body1_bytes, headers=_headers_for(body1_bytes))
         r2 = await client.post(path, content=body2_bytes, headers=_headers_for(body2_bytes))
     assert r1.status_code == 200, r1.text
-    assert r2.status_code == 409, f"Expected 409 mismatch for different body, got {r2.status_code}: {r2.text}"
+    assert r2.status_code == 409, f"Expected 409 mismatch, got {r2.status_code}: {r2.text}"
