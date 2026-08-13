@@ -1,0 +1,86 @@
+# Render Blueprint — provisions the API web service plus its managed backing
+# services (Postgres, Key Value) as code. R2/object storage is NOT here:
+# Render has no object store, so the bucket is created in Cloudflare's
+# dashboard and its credentials entered below as sync:false secrets.
+#
+# autoDeployTrigger: checksPass = Render ships a main commit only AFTER the
+# repo's GitHub checks (the `api` job in .github/workflows/ci.yml) go green.
+# A red CI run never reaches production even though Render owns the deploy.
+#
+# One-time setup: Render dashboard → New → Blueprint → pick this repo.
+# During that first sync you'll be prompted for every `sync: false` value.
+services:
+  - type: web
+    name: bazaar-api
+    runtime: python
+    plan: starter
+    branch: main
+    autoDeployTrigger: checksPass
+    rootDir: apps/api
+    buildCommand: "pip install uv && uv sync --no-dev"
+    startCommand: "uv run uvicorn bazaar_api.main:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /healthz
+
+    # Runs on the new version BEFORE it receives traffic, single instance —
+    # safe with >1 replica. Migrations run as the owner role (DATABASE_URL).
+    preDeployCommand: "uv run alembic upgrade head"
+
+    envVars:
+      # Owner connection for migrations/admin tooling. Render Postgres serves
+      # postgresql:// — SQLAlchemy needs the +asyncpg driver prefix, so the
+      # transform happens in config (see config.py), not here.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: bazaar-postgres
+          property: connectionString
+      # Runtime role connection (non-owner; RLS applies). Same host/db as
+      # DATABASE_URL but with the bazaar_app credentials — that's a manual
+      # secret because Render only knows the owner user it created.
+      - key: APP_DATABASE_URL
+        sync: false
+      # key_id -> {secret, app_id} map — dev seed for key issuance until the
+      # api_keys table lands (OD-1). e.g. {"bzk_abc":{"secret":"bzs_xyz","app_id":"app-a"}}
+      - key: KEYS
+        sync: false
+      # Master key for api_keys at-rest encryption (OD-1). Generate a strong
+      # random value; never reuse the dev default.
+      - key: KEY_ENCRYPTION_SECRET
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          name: bazaar-redis
+          type: keyvalue
+          property: connectionString
+      # Cloudflare R2 — set after the bucket exists in the Cloudflare dashboard.
+      - key: R2_ENDPOINT
+        sync: false
+      - key: R2_BUCKET
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+
+  - type: keyvalue
+    name: bazaar-redis
+    plan: starter
+    # Private-network-only: the API reaches it over Render's internal network;
+    # nothing from the public internet can connect.
+    ipAllowList: []
+
+databases:
+  - name: bazaar-postgres
+    plan: basic-256mb
+    databaseName: bazaar
+    postgresMajorVersion: "16" # match docker-compose.yml
+    # NOTE: Render Postgres does NOT run infra/postgres/init/*.sql — those are
+    # compose-only. After the instance is created, open its "Connect" → psql
+    # session and run the role bootstrap by hand:
+    #   CREATE ROLE bazaar_app LOGIN PASSWORD '<strong-password>';
+    #   GRANT CONNECT ON DATABASE bazaar TO bazaar_app;
+    #   GRANT USAGE ON SCHEMA public TO bazaar_app;
+    #   GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO bazaar_app;
+    #   ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    #     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO bazaar_app;
+    # Then set APP_DATABASE_URL (above) to:
+    #   postgresql+asyncpg://bazaar_app:<password>@<host>/bazaar

@@ -50,6 +50,7 @@ Full checklist: [`SETUP.md`](SETUP.md).
 | Task dir | Card | Author | Base | Oracle | Status |
 |---|---|---|---|---|---|
 | `aacheng_bazaar__r2-presign-attach-35952bf-v1` | `bazaar-r2-presign-attach-aacheng` | aacheng | `35952bf` | 3/3 @ 1.0 | `claimed` — BASE/no-op proof pending |
+| `aacheng_bazaar__rls-isolation-leak-35952bf-v1` | `bazaar-rls-isolation-leak-aacheng` | aacheng | `35952bf` | 4/4 RLS @ 1.0 job 2026-08-13__14-48-16__26422e (BASE 0/4 RED) | `claimed` — oracle-passed, ready for push |
 
 Update this table when a card changes status. `deprecated/` entries stay out of the roster
 but keep their card file with a recorded reason.

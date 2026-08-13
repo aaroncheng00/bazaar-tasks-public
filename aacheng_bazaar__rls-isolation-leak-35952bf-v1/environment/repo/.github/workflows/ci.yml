@@ -1,0 +1,150 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Lint the CODEOWNERS-gated contract first — a broken spec should fail
+      # before services start or code checks run. Errors fail; warnings inform.
+      - name: Lint OpenAPI spec (spectral)
+        run: npx --yes @stoplight/spectral-cli@6 lint spec/openapi.yaml
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Start backing services
+        run: docker compose up -d --wait
+
+      - name: Install dependencies
+        run: uv sync --frozen
+        working-directory: apps/api
+
+      - name: Run migrations
+        run: uv run alembic upgrade head
+        working-directory: apps/api
+
+      - name: Drift guard — spec vs generated
+        run: |
+          # Regenerate from spec/openapi.yaml and fail if generated/ is stale.
+          # --disable-timestamp keeps header deterministic.
+          uv run datamodel-codegen \
+            --input ../../spec/openapi.yaml \
+            --input-file-type openapi \
+            --output src/bazaar_api/generated/models.py \
+            --output-model-type pydantic_v2.BaseModel \
+            --use-annotated \
+            --field-constraints \
+            --snake-case-field \
+            --capitalise-enum-members \
+            --use-schema-description \
+            --target-python-version 3.12 \
+            --disable-timestamp
+          git diff --exit-code -- ../../spec/openapi.yaml src/bazaar_api/generated/
+        working-directory: apps/api
+
+      - name: Lint
+        run: uv run ruff check . && uv run ruff format --check .
+        working-directory: apps/api
+
+      - name: Typecheck
+        run: uv run mypy
+        working-directory: apps/api
+
+      - name: Test
+        run: uv run pytest
+        working-directory: apps/api
+
+  sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Spec lint
+        run: pnpm -F @bazaar/sdk spec:lint
+
+      - name: Drift guard — spec vs generated
+        run: |
+          pnpm -F @bazaar/sdk codegen
+          git diff --exit-code -- spec/openapi.yaml packages/sdk/src/gen/
+
+      - name: Version tracks spec
+        run: pnpm -F @bazaar/sdk check:version
+
+      - name: Lint
+        run: pnpm -F @bazaar/sdk lint
+
+      - name: Typecheck
+        run: pnpm -F @bazaar/sdk typecheck
+
+      - name: Unit tests
+        run: pnpm -F @bazaar/sdk test
+
+  contract:
+    runs-on: ubuntu-latest
+    env:
+      BAZAAR_ENV: dev
+      BAZAAR_KEYS: '{"bzk_dev": {"secret": "bzs_dev_secret", "app_id": "app-a"}}'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Start backing services
+        run: docker compose up -d --wait postgres redis
+
+      - name: Install API dependencies
+        run: uv sync --frozen
+        working-directory: apps/api
+
+      - name: Run migrations
+        run: uv run alembic upgrade head
+        working-directory: apps/api
+
+      - name: Start the API
+        run: uv run uvicorn bazaar_api.main:app --host 127.0.0.1 --port 8000 &
+        working-directory: apps/api
+
+      - name: Wait for the API
+        run: |
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8000/healthz && exit 0
+            sleep 1
+          done
+          echo "API did not become healthy" && exit 1
+
+      - name: Install SDK dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Contract tests
+        run: pnpm -F @bazaar/sdk test:contract
+        env:
+          BAZAAR_BASE_URL: http://127.0.0.1:8000
+          BAZAAR_KEY_ID: bzk_dev
+          BAZAAR_SECRET: bzs_dev_secret

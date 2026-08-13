@@ -1,0 +1,61 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: bazaar
+      POSTGRES_PASSWORD: bazaar
+      POSTGRES_DB: bazaar
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bazaar -d bazaar"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio123
+    ports:
+      - "9000:9000" # S3 API — matches R2_ENDPOINT in .env.example
+      - "9001:9001" # web console
+    volumes:
+      - miniodata:/data
+
+  # One-shot: applies Alembic migrations then exits. Makes `docker compose up`
+  # self-sufficient for a fresh checkout — no manual `alembic upgrade head`.
+  # Idempotent (no-op at head), so the CI step and Render preDeploy are
+  # unaffected. The venv is kept out of the bind-mounted source so it can't
+  # collide with the host's apps/api/.venv.
+  migrate:
+    image: python:3.12-slim
+    working_dir: /app
+    volumes:
+      - ./apps/api:/app
+    environment:
+      UV_PROJECT_ENVIRONMENT: /opt/venv
+      BAZAAR_DATABASE_URL: postgresql+asyncpg://bazaar:bazaar@postgres:5432/bazaar
+    command: sh -c "pip install -q uv && uv sync --frozen && uv run alembic upgrade head"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  miniodata:

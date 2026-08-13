@@ -1,0 +1,16 @@
+{
+  "name": "bazaar",
+  "private": true,
+  "packageManager": "pnpm@10.13.1",
+  "scripts": {
+    "build": "turbo run build",
+    "codegen": "turbo run codegen",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "check:spec": "pnpm --filter @bazaar/api run check:spec"
+  },
+  "devDependencies": {
+    "turbo": "^2.5.0"
+  }
+}

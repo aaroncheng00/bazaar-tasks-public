@@ -1,0 +1,27 @@
+{
+  "repo": "metainternal-aai/aai_labs_bazaar",
+  "instance_id": "bazaar-rls-leak-aacheng",
+  "base_commit": "HEAD",
+  "patch": "diff --git a/apps/api/migrations/versions/0001_initial.py b/apps/api/migrations/versions/0001_initial.py\nindex 3026f86..a63b49a 100644\n--- a/apps/api/migrations/versions/0001_initial.py\n+++ b/apps/api/migrations/versions/0001_initial.py\n@@ -33,11 +33,12 @@ def upgrade() -> None:\n     )\n \n     op.execute(\"ALTER TABLE docs ENABLE ROW LEVEL SECURITY\")\n-    # BUG: missing FORCE - owner bypasses RLS\n+    op.execute(\"ALTER TABLE docs FORCE ROW LEVEL SECURITY\")\n     op.execute(\n         \"\"\"\n         CREATE POLICY tenant_isolation ON docs\n-            USING (true)\n+            USING (app_id = current_setting('bazaar.app_id', true))\n+            WITH CHECK (app_id = current_setting('bazaar.app_id', true))\n         \"\"\"\n     )\n \ndiff --git a/apps/api/migrations/versions/0003_listings.py b/apps/api/migrations/versions/0003_listings.py\nindex 9064b41..c9c5e9b 100644\n--- a/apps/api/migrations/versions/0003_listings.py\n+++ b/apps/api/migrations/versions/0003_listings.py\n@@ -78,11 +78,12 @@ def upgrade() -> None:\n     )\n \n     op.execute(\"ALTER TABLE listings ENABLE ROW LEVEL SECURITY\")\n-    # BUG: missing FORCE, permissive policy - leaks cross-tenant rows\n+    op.execute(\"ALTER TABLE listings FORCE ROW LEVEL SECURITY\")\n     op.execute(\n         \"\"\"\n         CREATE POLICY tenant_isolation ON listings\n-            USING (true)\n+            USING (app_id = current_setting('bazaar.app_id', true))\n+            WITH CHECK (app_id = current_setting('bazaar.app_id', true))\n         \"\"\"\n     )\n \ndiff --git a/apps/api/src/bazaar_api/middleware/tenant.py b/apps/api/src/bazaar_api/middleware/tenant.py\nindex d42d923..fb77137 100644\n--- a/apps/api/src/bazaar_api/middleware/tenant.py\n+++ b/apps/api/src/bazaar_api/middleware/tenant.py\n@@ -1,6 +1,7 @@\n from collections.abc import AsyncIterator\n \n from fastapi import Depends\n+from sqlalchemy import text\n from sqlalchemy.ext.asyncio import AsyncSession\n \n from bazaar_api.db.session import session_factory\n@@ -26,8 +27,11 @@ async def tenant_session(\n     \"\"\"\n     token = set_app_id(app_id)\n     try:\n-        # BUG: missing SET LOCAL bazaar.app_id - RLS backstop never set\n         async with session_factory()() as session, session.begin():\n+            await session.execute(\n+                text(\"SELECT set_config('bazaar.app_id', :app_id, true)\"),\n+                {\"app_id\": app_id},\n+            )\n             yield session\n     finally:\n         reset_app_id(token)\n",
+  "test_patch": "",
+  "fail_to_pass": [
+    "tests/rls/test_tenant_isolation.py::test_tenant_cannot_read_other_tenants_rows",
+    "tests/rls/test_tenant_isolation.py::test_insert_with_other_tenants_app_id_is_rejected",
+    "tests/rls/test_tenant_isolation.py::test_unset_tenant_sees_nothing",
+    "tests/rls/test_tenant_isolation.py::test_tenant_setting_does_not_leak_across_transactions"
+  ],
+  "pass_to_pass": [
+    "tests/unit/test_tenant_leak.py::test_current_app_id_raises_when_unset",
+    "tests/unit/test_tenant_leak.py::test_set_reset_token_isolation",
+    "tests/unit/test_tenant_leak.py::test_concurrent_tasks_do_not_leak_tenant",
+    "tests/unit/test_config.py::test_prefixed_env_var_is_read",
+    "tests/unit/test_config.py::test_bare_env_var_is_safely_ignored"
+  ],
+  "selected_test_files_to_run": [
+    "apps/api/tests/rls/test_tenant_isolation.py",
+    "apps/api/tests/unit/test_tenant_leak.py",
+    "apps/api/tests/unit/test_config.py"
+  ],
+  "before_repo_set_cmd": "",
+  "_base_commit_sha": "35952bfad071179dece536ae828761d9e2883162"
+}

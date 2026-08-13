@@ -1,0 +1,63 @@
+diff --git a/apps/api/migrations/versions/0001_initial.py b/apps/api/migrations/versions/0001_initial.py
+index 3026f86..a63b49a 100644
+--- a/apps/api/migrations/versions/0001_initial.py
++++ b/apps/api/migrations/versions/0001_initial.py
+@@ -33,11 +33,12 @@ def upgrade() -> None:
+     )
+ 
+     op.execute("ALTER TABLE docs ENABLE ROW LEVEL SECURITY")
+-    # BUG: missing FORCE - owner bypasses RLS
++    op.execute("ALTER TABLE docs FORCE ROW LEVEL SECURITY")
+     op.execute(
+         """
+         CREATE POLICY tenant_isolation ON docs
+-            USING (true)
++            USING (app_id = current_setting('bazaar.app_id', true))
++            WITH CHECK (app_id = current_setting('bazaar.app_id', true))
+         """
+     )
+ 
+diff --git a/apps/api/migrations/versions/0003_listings.py b/apps/api/migrations/versions/0003_listings.py
+index 9064b41..c9c5e9b 100644
+--- a/apps/api/migrations/versions/0003_listings.py
++++ b/apps/api/migrations/versions/0003_listings.py
+@@ -78,11 +78,12 @@ def upgrade() -> None:
+     )
+ 
+     op.execute("ALTER TABLE listings ENABLE ROW LEVEL SECURITY")
+-    # BUG: missing FORCE, permissive policy - leaks cross-tenant rows
++    op.execute("ALTER TABLE listings FORCE ROW LEVEL SECURITY")
+     op.execute(
+         """
+         CREATE POLICY tenant_isolation ON listings
+-            USING (true)
++            USING (app_id = current_setting('bazaar.app_id', true))
++            WITH CHECK (app_id = current_setting('bazaar.app_id', true))
+         """
+     )
+ 
+diff --git a/apps/api/src/bazaar_api/middleware/tenant.py b/apps/api/src/bazaar_api/middleware/tenant.py
+index d42d923..fb77137 100644
+--- a/apps/api/src/bazaar_api/middleware/tenant.py
++++ b/apps/api/src/bazaar_api/middleware/tenant.py
+@@ -1,6 +1,7 @@
+ from collections.abc import AsyncIterator
+ 
+ from fastapi import Depends
++from sqlalchemy import text
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
+ from bazaar_api.db.session import session_factory
+@@ -26,8 +27,11 @@ async def tenant_session(
+     """
+     token = set_app_id(app_id)
+     try:
+-        # BUG: missing SET LOCAL bazaar.app_id - RLS backstop never set
+         async with session_factory()() as session, session.begin():
++            await session.execute(
++                text("SELECT set_config('bazaar.app_id', :app_id, true)"),
++                {"app_id": app_id},
++            )
+             yield session
+     finally:
+         reset_app_id(token)

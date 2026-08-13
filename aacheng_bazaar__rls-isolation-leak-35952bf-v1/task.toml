@@ -1,0 +1,42 @@
+schema_version = "1.1"
+
+[task]
+name = "codimango/aacheng_bazaar__rls-isolation-leak-35952bf-v1"
+format = "swe_bench_single_turn"
+workstream = "swe_public_repo"
+description = "Fix tenant isolation leak — RLS policies permissive (USING true, no FORCE/WITH CHECK) and tenant_session missing SET LOCAL"
+authors = [{ name = "Aaron Cheng", email = "aacheng@meta.com" }]
+keywords = ["python", "fastapi", "postgres", "rls", "tenant-isolation", "security"]
+
+[metadata]
+author_name = "Aaron Cheng"
+author_email = "aacheng@meta.com"
+difficulty = "hard"
+category = "security"
+category_usecase = "enforce_policy"
+category_subdomain = "security_and_privacy"
+reward_type = "binary"
+languages = ["python"]
+tags = ["synthetic", "aai-labs-harvester", "meta/avocado-5.14-code", "human-reviewed", "swe-bench-pro", "aai-labs", "bazaar-s1", "security"]
+multi_container = true
+
+[verifier]
+timeout_sec = 900.0
+
+[agent]
+timeout_sec = 1800.0
+
+[environment]
+build_timeout_sec = 900.0
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240
+gpus = 0
+allow_internet = true
+mcp_servers = []
+
+[verifier.env]
+
+[environment.env]
+
+[solution.env]

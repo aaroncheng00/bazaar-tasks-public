@@ -1,0 +1,23 @@
+# Bazaar CODEOWNERS — Architecture §15.3
+# spec/ is the source of truth; all five owners contribute shapes but P2 (Srimanisha)
+# is the gatekeeper and burns down Open Decisions. Any change to the spec must
+# be ratified with owners of affected modules.
+
+# Source of truth — five-way input, single gatekeeper
+/spec/ @srimanisha
+
+# Generated code — never hand-edit, drift guard enforces
+/apps/api/src/bazaar_api/generated/ @srimanisha
+
+# Listing core + actions helper + scaffold ownership
+/apps/api/src/bazaar_api/modules/listings/ @srimanisha
+
+# Docs/reference demo scaffold (P1/P3 input but P2 coordination)
+# /apps/docs/ @srimanisha — not yet scaffolded
+
+# Default: everyone, but infra & auth have their own owners (not CODEOWNERS-enforced
+# here to avoid blocking on-call, but listed for discoverability):
+# S1 — repo/CI/docker-compose/R2//healthz/apps/images
+# S2 — FastAPI platform, HMAC middleware, mark_sold, POST reviews
+# P1 — SDK, docs, review read path
+# P3 — search schema/indexes, GET /v1/listings
